@@ -4,6 +4,35 @@ const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./tra
 
 const STORE_FILE = "store.json";
 
+/**
+ * store.json structure (persisted in DATA_DIR/store.json)
+ *
+ * {
+ *   owners: {
+ *     david: {
+ *       trackings: ["PH7...", "323..."] ,
+ *       // meta holds user-provided metadata per tracking number
+ *       meta: {
+ *         "PH7...": {
+ *           note: "Amazon - regalo",       // free text shown in status lines
+ *           delivered_override: false       // OPTIONAL: force delivered true/false. If undefined, use 17Track flags.
+ *         }
+ *       },
+ *       // last holds the latest normalized 17Track status per tracking
+ *       last: {
+ *         "PH7...": {
+ *           number: "PH7...",
+ *           carrierKey: 19181,
+ *           carrierName: "Correos Spain",
+ *           latest: { status, subStatus, description, time, location },
+ *           flags: { isOutForDelivery, isDelivered }
+ *         }
+ *       }
+ *     }
+ *   }
+ * }
+ */
+
 function loadStore() { return readJson(STORE_FILE, { owners: {} }); }
 function saveStore(store) { writeJson(STORE_FILE, store); }
 
@@ -22,24 +51,51 @@ function getOwner(store, owner) {
   return o && typeof o === "object" ? o : null;
 }
 
-function buildStatusLine(one, note) {
+function getMeta(o) {
+  return o && o.meta && typeof o.meta === "object" ? o.meta : {};
+}
+
+function getTrackingMeta(o, tn) {
+  const meta = getMeta(o);
+  const m = meta?.[tn];
+  return m && typeof m === "object" ? m : {};
+}
+
+// Returns effective delivered flag, honoring manual override if present.
+function effectiveIsDelivered(one, trackingMeta) {
+  const ov = trackingMeta?.delivered_override;
+  if (ov === true || ov === false) return ov;
+  return !!one?.flags?.isDelivered;
+}
+
+// Returns effective out-for-delivery flag (currently no override; placeholder if needed later).
+function effectiveIsOutForDelivery(one) {
+  return !!one?.flags?.isOutForDelivery;
+}
+
+function buildStatusLine(one, note, opts = {}) {
   const tn = one?.number || "";
   const desc = one?.latest?.description || "";
   const st = one?.latest?.status || "";
   const carrier = one?.carrierName || "";
   const loc = one?.latest?.location || "";
+
   const extra = [carrier, loc].filter(Boolean).join(" · ");
   const right = desc || st || "(sin datos)";
   const left = note ? `${tn} (${note})` : tn;
-  return `- ${left}: ${right}${extra ? ` — ${extra}` : ""}`;
+
+  // If delivered_override was applied, show a tiny marker so we remember it's manual.
+  const mark = opts?.delivered_override_applied ? " (manual)" : "";
+
+  return `- ${left}: ${right}${extra ? ` — ${extra}` : ""}${mark}`;
 }
 
-function matchesFilter(one, filter) {
+function matchesFilter(one, filter, trackingMeta = {}) {
   if (!filter) return true;
   const f = String(filter).toLowerCase();
 
-  if (f === "out_for_delivery" || f === "reparto") return !!one?.flags?.isOutForDelivery;
-  if (f === "delivered" || f === "entregado") return !!one?.flags?.isDelivered;
+  if (f === "out_for_delivery" || f === "reparto") return effectiveIsOutForDelivery(one);
+  if (f === "delivered" || f === "entregado") return effectiveIsDelivered(one, trackingMeta);
 
   // status/substatus contains
   const st = String(one?.latest?.status || "").toLowerCase();
@@ -68,6 +124,32 @@ app.post("/api/owner/:owner/tracking", (req, res) => {
 
   saveStore(store);
   res.json({ ok: true, owner, tracking, note });
+});
+
+// Set or clear a manual delivered override for a tracking number.
+// Body: { delivered: true|false|null }
+// - true/false forces the delivered flag (useful when 17Track is wrong)
+// - null (or missing) clears the override and returns to 17Track-derived flags
+app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const tracking = String(req.params.tracking || "").trim().toUpperCase();
+  const delivered = req.body?.delivered;
+
+  const store = loadStore();
+  store.owners[owner] = store.owners[owner] || { trackings: [], meta: {} };
+  const o = store.owners[owner];
+  o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
+  o.meta[tracking] = o.meta[tracking] && typeof o.meta[tracking] === "object" ? o.meta[tracking] : {};
+
+  if (delivered === true || delivered === false) {
+    o.meta[tracking].delivered_override = delivered;
+  } else {
+    // clear override
+    if (o.meta[tracking].delivered_override !== undefined) delete o.meta[tracking].delivered_override;
+  }
+
+  saveStore(store);
+  return res.json({ ok: true, owner, tracking, delivered_override: o.meta[tracking].delivered_override ?? null });
 });
 
 app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
@@ -131,15 +213,32 @@ app.get("/api/owner/:owner/status", (req, res) => {
 
   const items = Object.keys(last)
     .sort()
-    .map((tn) => ({ tn, one: last[tn], note: meta?.[tn]?.note || "" }))
-    .filter((x) => x.one && matchesFilter(x.one, filter));
+    .map((tn) => {
+      const one = last[tn];
+      const m = getTrackingMeta(o, tn);
+      const note = m?.note || "";
+      const delivered_override_applied = (m.delivered_override === true || m.delivered_override === false);
+      return { tn, one, note, meta: m, delivered_override_applied };
+    })
+    .filter((x) => x.one && matchesFilter(x.one, filter, x.meta));
 
   if (format === "text") {
-    const lines = items.map((x) => buildStatusLine(x.one, x.note));
+    const lines = items.map((x) => buildStatusLine(x.one, x.note, { delivered_override_applied: x.delivered_override_applied }));
     return res.type("text/plain").send(lines.join("\n"));
   }
 
-  return res.json({ ok: true, owner, filter: filter || null, count: items.length, items });
+  return res.json({
+    ok: true,
+    owner,
+    filter: filter || null,
+    count: items.length,
+    items: items.map((x) => ({
+      tracking: x.tn,
+      one: x.one,
+      note: x.note,
+      delivered_override: (x.meta?.delivered_override === true || x.meta?.delivered_override === false) ? x.meta.delivered_override : null
+    }))
+  });
 });
 
 app.post("/api/owner/:owner/refresh", async (req, res) => {

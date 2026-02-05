@@ -1,6 +1,7 @@
 const express = require("express");
 const { readJson, writeJson } = require("./storage");
 const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./track17");
+const { CARRIERS } = require("./carriers");
 
 const STORE_FILE = "store.json";
 
@@ -47,7 +48,295 @@ app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.get("/api/carriers", (_req, res) => res.json({ carriers_map: {} }));
+// Carriers live in ./carriers.js for easier maintenance (names + keys).
+// CARRIERS: { alias: { key, name }, ... }
+const CARRIERS_MAP = Object.fromEntries(
+  Object.entries(CARRIERS).map(([alias, v]) => [alias, v.key])
+);
+
+// Expose the full carriers object so clients can show friendly names.
+app.get("/api/carriers", (_req, res) => res.json({ carriers: CARRIERS }));
+// ---- Background scheduler (Step 3) ----
+// Enable with: BG_ENABLED=1
+// Interval: BG_INTERVAL_MIN (default 15)
+// Refresh policy: BG_NORMAL_INTERVAL_MIN (default 45), BG_SLOW_HOURS (default "8,20")
+// Rate limit between trackings: BG_DELAY_MS (default 5000)
+// Home Assistant notify target:
+//   HA_URL (e.g. http://homeassistant:8123 or http://192.168.x.x:8123)
+//   HA_TOKEN (Long-Lived Access Token)
+//   HA_SCRIPT (script entity/service name without domain, default: jarvis_17track_notify)
+
+const BG_ENABLED = String(process.env.BG_ENABLED || "").trim() === "1";
+const BG_INTERVAL_MIN = Number(process.env.BG_INTERVAL_MIN || 15);
+const BG_NORMAL_INTERVAL_MIN = Number(process.env.BG_NORMAL_INTERVAL_MIN || 45);
+const BG_SLOW_HOURS = String(process.env.BG_SLOW_HOURS || "8,20")
+  .split(",")
+  .map((x) => Number(String(x).trim()))
+  .filter((n) => !isNaN(n));
+const BG_DELAY_MS = Number(process.env.BG_DELAY_MS || 5000);
+
+const HA_URL = String(process.env.HA_URL || "").trim().replace(/\/$/, "");
+const HA_TOKEN = String(process.env.HA_TOKEN || "").trim();
+const HA_SCRIPT = String(process.env.HA_SCRIPT || "jarvis_17track_notify").trim();
+
+async function callHAService(domain, service, data) {
+  if (!HA_URL || !HA_TOKEN) {
+    throw new Error("HA_URL/HA_TOKEN no configurados");
+  }
+
+  const url = `${HA_URL}/api/services/${domain}/${service}`;
+  const r = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${HA_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(data || {})
+  });
+
+  if (!r.ok) {
+    const txt = await r.text().catch(() => "");
+    throw new Error(`HA call failed ${r.status}: ${txt}`);
+  }
+
+  // HA returns an array; we don't really need it.
+  return await r.json().catch(() => ({}));
+}
+
+// Background runtime state
+const bgState = {
+  enabled: BG_ENABLED,
+  running: false,
+  intervalId: null,
+  lastRunAt: null,
+  lastError: null,
+  lastSummary: null
+};
+function ownersFromStore(store) {
+  const owners = store?.owners && typeof store.owners === "object" ? store.owners : {};
+  return Object.keys(owners);
+}
+
+function getAnnouncedMap(o) {
+  // Tracks which tracking numbers have already been announced as "out for delivery".
+  // Structure: o.announced = { out_for_delivery: { "TN": true, ... } }
+  o.announced = o.announced && typeof o.announced === "object" ? o.announced : {};
+  o.announced.out_for_delivery = o.announced.out_for_delivery && typeof o.announced.out_for_delivery === "object" ? o.announced.out_for_delivery : {};
+  return o.announced.out_for_delivery;
+}
+
+function buildOwnerDeliveryMessage(ownerKey, newOnes) {
+  // newOnes: array of normalized "one" objects
+  const lines = newOnes.map((one) => {
+    const tn = one?.number || "";
+    const desc = one?.latest?.description || one?.latest?.status || "(sin datos)";
+    const carrier = one?.carrierName || "";
+    const loc = one?.latest?.location || "";
+    const extra = [carrier, loc].filter(Boolean).join(" · ");
+    return `- ${tn}: ${desc}${extra ? ` — ${extra}` : ""}`;
+  });
+
+  return `📦 Paquete(s) en reparto (${ownerKey}):\n${lines.join("\n")}`;
+}
+
+async function refreshOwnerPolicy(o, ownerKey, now, opts) {
+  const decision = shouldRefreshOwnerNow(o, now, {
+    normalIntervalMin: opts.normalIntervalMin,
+    slowHours: opts.slowHours
+  });
+
+  if (!decision.should) {
+    return { refreshed: false, decision, results: [] };
+  }
+
+  const trackings = ownerTrackings(o);
+  const results = [];
+
+  for (let i = 0; i < trackings.length; i++) {
+    const tn = trackings[i];
+
+    try {
+      const { json } = await getTrackInfo(tn);
+      const norm = normalizeGetTrackInfoResponse(json);
+      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
+
+      o.last = o.last || {};
+      o.last[tn] = one || { number: tn, latest: null, flags: null, error: norm.ok ? null : norm.error };
+      results.push({ tracking: tn, ok: norm.ok, one });
+    } catch (e) {
+      o.last = o.last || {};
+      o.last[tn] = { number: tn, latest: null, flags: null, error: String(e.message || e) };
+      results.push({ tracking: tn, ok: false, error: String(e.message || e) });
+    }
+
+    if (i < trackings.length - 1) await sleep(opts.delayMs);
+  }
+
+  // bookkeeping timestamps
+  o.last_checked_at = now.toISOString();
+  if (decision.mode === "slow") {
+    o.last_full_refresh_at = now.toISOString();
+  }
+
+  return { refreshed: true, decision, results };
+}
+
+function detectNewOutForDelivery(o, prevLast) {
+  const announced = getAnnouncedMap(o);
+  const nowLast = ownerLastMap(o);
+
+  const newOnes = [];
+
+  for (const tn of Object.keys(nowLast)) {
+    const one = nowLast[tn];
+    if (!one) continue;
+
+    const isOFD = effectiveIsOutForDelivery(one);
+    if (!isOFD) {
+      // If it is no longer out for delivery, clear announced so it can re-trigger if it goes back to OFD.
+      if (announced[tn]) delete announced[tn];
+      continue;
+    }
+
+    // If already announced, skip
+    if (announced[tn]) continue;
+
+    // If previously out for delivery, skip (extra safety)
+    const prevOne = prevLast?.[tn];
+    const wasOFD = prevOne ? effectiveIsOutForDelivery(prevOne) : false;
+    if (wasOFD) {
+      announced[tn] = true;
+      continue;
+    }
+
+    // New transition
+    announced[tn] = true;
+    newOnes.push(one);
+  }
+
+  return newOnes;
+}
+
+async function bgRunOnce() {
+  if (bgState.running) return { ok: false, skipped: true, reason: "already_running" };
+  bgState.running = true;
+  bgState.lastError = null;
+
+  const started = new Date();
+  bgState.lastRunAt = started.toISOString();
+
+  try {
+    const store = loadStore();
+    const ownerKeys = ownersFromStore(store);
+
+    const summary = {
+      owners_total: ownerKeys.length,
+      owners_refreshed: 0,
+      owners_skipped: 0,
+      notifications_sent: 0,
+      notified: []
+    };
+
+    for (const ownerKey of ownerKeys) {
+      const o = store.owners[ownerKey];
+      if (!o || typeof o !== "object") continue;
+
+      // If no trackings, skip
+      const tns = ownerTrackings(o);
+      if (tns.length === 0) {
+        summary.owners_skipped++;
+        continue;
+      }
+
+      const prevLast = { ...(o.last && typeof o.last === "object" ? o.last : {}) };
+
+      const r = await refreshOwnerPolicy(o, ownerKey, new Date(), {
+        delayMs: BG_DELAY_MS,
+        normalIntervalMin: BG_NORMAL_INTERVAL_MIN,
+        slowHours: BG_SLOW_HOURS
+      });
+
+      if (!r.refreshed) {
+        summary.owners_skipped++;
+        continue;
+      }
+
+      summary.owners_refreshed++;
+
+      // Detect new transitions to out-for-delivery
+      const newOnes = detectNewOutForDelivery(o, prevLast);
+      if (newOnes.length > 0) {
+        const message = buildOwnerDeliveryMessage(ownerKey, newOnes);
+
+        // Notify HA via a single script, HA decides voice vs telegram based on presence.
+        await callHAService("script", HA_SCRIPT, {
+          owner: ownerKey,
+          message,
+          trackings: newOnes.map((x) => x?.number).filter(Boolean)
+        });
+
+        summary.notifications_sent++;
+        summary.notified.push({ owner: ownerKey, count: newOnes.length });
+      }
+
+      // Save owner changes after each owner to persist announced map and last timestamps.
+      store.owners[ownerKey] = o;
+      saveStore(store);
+    }
+
+    bgState.lastSummary = summary;
+
+    return { ok: true, ran: true, summary };
+  } catch (e) {
+    bgState.lastError = String(e.message || e);
+    return { ok: false, error: bgState.lastError };
+  } finally {
+    bgState.running = false;
+  }
+}
+// ---- Background endpoints ----
+app.get("/api/bg/status", (_req, res) => {
+  res.json({
+    ok: true,
+    enabled: bgState.enabled,
+    running: bgState.running,
+    interval_min: BG_INTERVAL_MIN,
+    normal_interval_min: BG_NORMAL_INTERVAL_MIN,
+    slow_hours: BG_SLOW_HOURS,
+    delay_ms: BG_DELAY_MS,
+    last_run_at: bgState.lastRunAt,
+    last_error: bgState.lastError,
+    last_summary: bgState.lastSummary,
+    ha_configured: !!(HA_URL && HA_TOKEN)
+  });
+});
+
+app.post("/api/bg/run_once", async (_req, res) => {
+  const r = await bgRunOnce();
+  res.json(r);
+});
+
+app.post("/api/bg/start", (_req, res) => {
+  if (bgState.intervalId) {
+    return res.json({ ok: true, started: false, reason: "already_started" });
+  }
+
+  bgState.enabled = true;
+  bgState.intervalId = setInterval(() => {
+    bgRunOnce().catch(() => { });
+  }, Math.max(1, BG_INTERVAL_MIN) * 60 * 1000);
+
+  return res.json({ ok: true, started: true, interval_min: BG_INTERVAL_MIN });
+});
+
+app.post("/api/bg/stop", (_req, res) => {
+  if (bgState.intervalId) {
+    clearInterval(bgState.intervalId);
+    bgState.intervalId = null;
+  }
+  bgState.enabled = false;
+  res.json({ ok: true, stopped: true });
+});
 
 function getOwner(store, owner) {
   const o = store.owners?.[owner];
@@ -478,7 +767,25 @@ app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {
   res.json({ ok: true, owner, filter: filter || null, refreshed: results.length, matched: filtered.length, items: filtered });
 });
 
+function startBackgroundIfEnabled() {
+  if (!BG_ENABLED) return;
+  if (bgState.intervalId) return;
+
+  // Run once shortly after boot (helps after restarts / power cuts).
+  setTimeout(() => {
+    bgRunOnce().catch(() => { });
+  }, 10_000);
+
+  bgState.intervalId = setInterval(() => {
+    bgRunOnce().catch(() => { });
+  }, Math.max(1, BG_INTERVAL_MIN) * 60 * 1000);
+
+  bgState.enabled = true;
+  console.log(`[BG] enabled. interval=${BG_INTERVAL_MIN}min normal=${BG_NORMAL_INTERVAL_MIN}min slowHours=${BG_SLOW_HOURS.join(",")}`);
+}
+
 const port = process.env.PORT || 8787;
 app.listen(port, () => {
   console.log(`17Track app listening on ${port}`);
+  startBackgroundIfEnabled();
 });

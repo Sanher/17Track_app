@@ -1,5 +1,6 @@
 const express = require("express");
 const { readJson, writeJson } = require("./storage");
+const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./track17");
 
 const STORE_FILE = "store.json";
 const app = express();
@@ -59,3 +60,37 @@ app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
   saveStore(store);
   res.json({ ok: true, owner, tracking });
 });
+
+app.post("/api/track/refresh", async (req, res) => {
+  const number = String(req.body?.tracking || "").trim().toUpperCase();
+  const carrier = req.body?.carrier ? Number(req.body.carrier) : undefined;
+
+  if (!number) return res.status(400).json({ error: "tracking es obligatorio" });
+
+  try {
+    const { json } = await getTrackInfo(number, carrier);
+    return res.json(normalizeGetTrackInfoResponse(json));
+  } catch (e) {
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+app.post("/api/track/register", async (req, res) => {
+  const number = String(req.body?.tracking || "").trim().toUpperCase();
+  const carrier = req.body?.carrier ? Number(req.body.carrier) : undefined;
+
+  if (!number) return res.status(400).json({ error: "tracking es obligatorio" });
+
+  try {
+    const r1 = await register(number, carrier);
+    const r2 = await getTrackInfo(number, carrier);
+    return res.json({
+      register: r1.json,
+      refresh: normalizeGetTrackInfoResponse(r2.json)
+    });
+  } catch (e) {
+    return res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+

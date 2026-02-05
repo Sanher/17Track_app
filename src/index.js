@@ -27,7 +27,10 @@ const STORE_FILE = "store.json";
  *           latest: { status, subStatus, description, time, location },
  *           flags: { isOutForDelivery, isDelivered }
  *         }
- *       }
+ *       },
+ *       // refresh bookkeeping (ISO timestamps)
+ *       last_checked_at: "2026-02-05T10:15:00+01:00",       // last time we attempted a refresh for this owner
+ *       last_full_refresh_at: "2026-02-05T08:00:00+01:00"   // last time we refreshed while all were delivered (slow schedule)
  *     }
  *   }
  * }
@@ -72,6 +75,96 @@ function effectiveIsDelivered(one, trackingMeta) {
 function effectiveIsOutForDelivery(one) {
   return !!one?.flags?.isOutForDelivery;
 }
+
+// ---- Pending detection and refresh policy helpers ----
+
+function ownerTrackings(o) {
+  return Array.isArray(o?.trackings) ? o.trackings.map((x) => String(x || "").trim().toUpperCase()).filter(Boolean) : [];
+}
+
+function ownerLastMap(o) {
+  return o?.last && typeof o.last === "object" ? o.last : {};
+}
+
+// Returns list of tracking numbers that are NOT delivered (honoring delivered_override).
+function ownerPendingList(o) {
+  const tns = ownerTrackings(o);
+  const last = ownerLastMap(o);
+  const pending = [];
+  for (const tn of tns) {
+    const one = last?.[tn];
+    const meta = getTrackingMeta(o, tn);
+    // If we have no status yet, treat as pending so it will refresh.
+    const delivered = one ? effectiveIsDelivered(one, meta) : false;
+    if (!delivered) pending.push(tn);
+  }
+  return pending;
+}
+
+function parseIsoDate(s) {
+  const d = s ? new Date(String(s)) : null;
+  return d && !isNaN(d.getTime()) ? d : null;
+}
+
+// Decide whether we should refresh now.
+// Policy:
+// - If owner has pending trackings => refresh every normalIntervalMin
+// - If owner has trackings but all delivered => refresh only at specified hours (e.g. 8 and 20)
+// - If owner has no trackings => never
+function shouldRefreshOwnerNow(o, now, opts = {}) {
+  const normalIntervalMin = Number(opts.normalIntervalMin ?? 45);
+  const slowHours = Array.isArray(opts.slowHours) ? opts.slowHours : [8, 20];
+
+  const tns = ownerTrackings(o);
+  if (tns.length === 0) return { should: false, reason: "no_trackings" };
+
+  const pending = ownerPendingList(o);
+  const allDelivered = pending.length === 0;
+
+  const lastChecked = parseIsoDate(o?.last_checked_at);
+  const lastFull = parseIsoDate(o?.last_full_refresh_at);
+
+  if (!allDelivered) {
+    // Normal schedule: every N minutes
+    if (!lastChecked) return { should: true, mode: "normal", reason: "never_checked", pending };
+    const mins = (now.getTime() - lastChecked.getTime()) / 60000;
+    if (mins >= normalIntervalMin) return { should: true, mode: "normal", reason: "interval_elapsed", pending };
+    return { should: false, mode: "normal", reason: "interval_not_elapsed", pending, next_in_min: Math.max(0, normalIntervalMin - mins) };
+  }
+
+  // Slow schedule: only at fixed hours (default 08:00 and 20:00)
+  const hour = now.getHours();
+  const isSlowHour = slowHours.includes(hour);
+  if (!isSlowHour) return { should: false, mode: "slow", reason: "not_slow_hour", pending: [] };
+
+  // If we already did a slow refresh in this same hour window, skip.
+  if (lastFull) {
+    const sameDay = lastFull.getFullYear() === now.getFullYear() && lastFull.getMonth() === now.getMonth() && lastFull.getDate() === now.getDate();
+    const sameHour = lastFull.getHours() === hour;
+    if (sameDay && sameHour) return { should: false, mode: "slow", reason: "already_refreshed_this_hour", pending: [] };
+  }
+
+  return { should: true, mode: "slow", reason: "slow_hour", pending: [] };
+}
+// Inspect pending status for an owner (without refreshing)
+app.get("/api/owner/:owner/pending", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ error: "owner no existe" });
+
+  const tns = ownerTrackings(o);
+  const pending = ownerPendingList(o);
+
+  return res.json({
+    ok: true,
+    owner,
+    total: tns.length,
+    pending_count: pending.length,
+    all_delivered: pending.length === 0 && tns.length > 0,
+    pending
+  });
+});
 
 function buildStatusLine(one, note, opts = {}) {
   const tn = one?.number || "";
@@ -241,6 +334,7 @@ app.get("/api/owner/:owner/status", (req, res) => {
   });
 });
 
+
 app.post("/api/owner/:owner/refresh", async (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const delayMs = Number(req.body?.delay_ms ?? 5000); // 5s por defecto
@@ -283,6 +377,60 @@ app.post("/api/owner/:owner/refresh", async (req, res) => {
   saveStore(store);
 
   res.json({ ok: true, owner, count: results.length, results });
+});
+
+// Conditional refresh endpoint: only refresh if policy says it's time
+app.post("/api/owner/:owner/refresh_if_needed", async (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const delayMs = Number(req.body?.delay_ms ?? 5000);
+  const normalIntervalMin = Number(req.body?.normal_interval_min ?? 45);
+  const slowHours = Array.isArray(req.body?.slow_hours) ? req.body.slow_hours.map((x) => Number(x)).filter((n) => !isNaN(n)) : [8, 20];
+
+  const now = new Date();
+
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ error: "owner no existe" });
+
+  const decision = shouldRefreshOwnerNow(o, now, { normalIntervalMin, slowHours });
+  if (!decision.should) {
+    // still update last_checked_at? No: only update when we actually attempt refresh.
+    return res.json({ ok: true, owner, refreshed: false, decision });
+  }
+
+  const trackings = ownerTrackings(o);
+  if (trackings.length === 0) return res.json({ ok: true, owner, refreshed: false, decision: { ...decision, reason: "no_trackings" } });
+
+  const results = [];
+  for (let i = 0; i < trackings.length; i++) {
+    const tn = trackings[i];
+    try {
+      const { json } = await getTrackInfo(tn);
+      const norm = normalizeGetTrackInfoResponse(json);
+      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
+
+      o.last = o.last || {};
+      o.last[tn] = one || { number: tn, latest: null, flags: null, error: norm.ok ? null : norm.error };
+      results.push({ tracking: tn, ok: norm.ok, one });
+    } catch (e) {
+      o.last = o.last || {};
+      o.last[tn] = { number: tn, latest: null, flags: null, error: String(e.message || e) };
+      results.push({ tracking: tn, ok: false, error: String(e.message || e) });
+    }
+
+    if (i < trackings.length - 1) await sleep(delayMs);
+  }
+
+  // bookkeeping timestamps
+  o.last_checked_at = now.toISOString();
+  if (decision.mode === "slow") {
+    o.last_full_refresh_at = now.toISOString();
+  }
+
+  store.owners[owner] = o;
+  saveStore(store);
+
+  return res.json({ ok: true, owner, refreshed: true, decision, count: results.length, results });
 });
 
 app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {

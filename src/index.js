@@ -486,6 +486,154 @@ function matchesFilter(one, filter, trackingMeta = {}) {
   return st.includes(f) || sub.includes(f) || desc.includes(f);
 }
 
+// ---- Utilities to resolve a tracking by "alias" (note) or by tracking number ----
+function normalizeQuery(q) {
+  return String(q || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function resolveTrackingQueryAll(o, q, opts = {}) {
+  // Returns an array of { tracking, note, score } sorted best-first.
+  // Rules:
+  // - Exact tracking match wins.
+  // - Otherwise, match against note (substring). Prefer exact note, then startsWith, then includes.
+  const query = normalizeQuery(q);
+  if (!query) return [];
+
+  const tns = ownerTrackings(o);
+  const out = [];
+
+  // 1) exact tracking
+  const exact = tns.find((tn) => tn.toLowerCase() === query);
+  if (exact) {
+    const note = getTrackingMeta(o, exact)?.note || "";
+    out.push({ tracking: exact, note, score: 100 });
+    return out;
+  }
+
+  // 2) by note
+  for (const tn of tns) {
+    const note = String(getTrackingMeta(o, tn)?.note || "").trim();
+    const n = normalizeQuery(note);
+    if (!n) continue;
+
+    if (n === query) out.push({ tracking: tn, note, score: 90 });
+    else if (n.startsWith(query)) out.push({ tracking: tn, note, score: 80 });
+    else if (n.includes(query)) out.push({ tracking: tn, note, score: 70 });
+  }
+
+  // Prefer higher score, then shorter note (more specific), then tracking asc
+  out.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    const al = (a.note || "").length;
+    const bl = (b.note || "").length;
+    if (al !== bl) return al - bl;
+    return String(a.tracking).localeCompare(String(b.tracking));
+  });
+
+  const limit = Number(opts.limit ?? 10);
+  return out.slice(0, Math.max(1, limit));
+}
+
+function resolveTrackingQuery(o, q) {
+  // Back-compat: return only the best match or null.
+  const all = resolveTrackingQueryAll(o, q, { limit: 10 });
+  return all.length ? all[0] : null;
+}
+
+function shortOne(one) {
+  if (!one) return null;
+  return {
+    number: one.number,
+    carrierName: one.carrierName,
+    carrierCountry: one.carrierCountry,
+    latest: one.latest
+      ? {
+        status: one.latest.status ?? null,
+        subStatus: one.latest.subStatus ?? null,
+        description: one.latest.description ?? null,
+        time: one.latest.time ?? null,
+        location: one.latest.location ?? null
+      }
+      : null,
+    flags: one.flags
+      ? {
+        isOutForDelivery: !!one.flags.isOutForDelivery,
+        isDelivered: !!one.flags.isDelivered
+      }
+      : null
+  };
+}
+
+// List trackings for an owner (useful for Telegram/HA without parsing the text status)
+app.get("/api/owner/:owner/trackings", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ error: "owner no existe" });
+
+  const tns = ownerTrackings(o);
+  const last = ownerLastMap(o);
+
+  const items = tns.map((tn) => {
+    const meta = getTrackingMeta(o, tn);
+    const delivered_override =
+      meta?.delivered_override === true || meta?.delivered_override === false
+        ? meta.delivered_override
+        : null;
+
+    return {
+      tracking: tn,
+      note: String(meta?.note || "").trim() || "",
+      delivered_override,
+      delivered_effective: effectiveIsDelivered(last?.[tn], meta),
+      out_for_delivery: effectiveIsOutForDelivery(last?.[tn]),
+      one: shortOne(last?.[tn])
+    };
+  });
+
+  return res.json({ ok: true, owner, count: items.length, items });
+});
+
+// Resolve a query to a tracking number by either tracking itself or note/alias.
+// Example: /api/owner/david/resolve?q=ropa
+app.get("/api/owner/:owner/resolve", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const q = String(req.query?.q || req.query?.query || "");
+
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ error: "owner no existe" });
+
+  const matches = resolveTrackingQueryAll(o, q, { limit: 5 });
+  if (!matches.length) {
+    return res.status(404).json({ ok: false, owner, query: q, error: "no_match" });
+  }
+  const hit = matches[0];
+  const last = ownerLastMap(o);
+  const meta = getTrackingMeta(o, hit.tracking);
+  const delivered_override =
+    meta?.delivered_override === true || meta?.delivered_override === false
+      ? meta.delivered_override
+      : null;
+
+  return res.json({
+    ok: true,
+    owner,
+    query: q,
+    tracking: hit.tracking,
+    note: hit.note || "",
+    score: hit.score,
+    matches: matches.map((m) => ({ tracking: m.tracking, note: m.note || "", score: m.score })),
+    delivered_override,
+    delivered_effective: effectiveIsDelivered(last?.[hit.tracking], meta),
+    out_for_delivery: effectiveIsOutForDelivery(last?.[hit.tracking]),
+    one: shortOne(last?.[hit.tracking])
+  });
+});
+
 app.get("/api/store", (_req, res) => {
   res.json(loadStore());
 });

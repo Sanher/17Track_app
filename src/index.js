@@ -47,6 +47,7 @@ const app = express();
 app.use(express.json());
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/api/_build", (_req, res) => res.json({ ok: true, build: "v0.2.3", has_trackings: true }));
 
 // Carriers live in ./carriers.js for easier maintenance (names + keys).
 // CARRIERS: { alias: { key, name }, ... }

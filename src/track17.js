@@ -1,4 +1,23 @@
 const API = "https://api.17track.net/track/v2.2";
+const TRACK17_TIMEOUT_MS = Number(process.env.TRACK17_TIMEOUT_MS || 15000);
+const APP_LOG_LEVEL = String(process.env.APP_LOG_LEVEL || "info").trim().toLowerCase();
+const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+
+function logAt(level, message, extra = {}) {
+  const target = LOG_LEVELS[level] ?? LOG_LEVELS.info;
+  const current = LOG_LEVELS[APP_LOG_LEVEL] ?? LOG_LEVELS.info;
+  if (target < current) return;
+  const payload = {
+    ts: new Date().toISOString(),
+    level,
+    msg: message,
+    ...extra
+  };
+  const line = `[17TRACK] ${JSON.stringify(payload)}`;
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+}
 
 function getToken() {
   const t = process.env.TRACK17_TOKEN || "";
@@ -7,32 +26,77 @@ function getToken() {
 }
 
 async function post(path, body) {
-  const res = await fetch(`${API}${path}`, {
-    method: "POST",
-    headers: {
-      "17token": getToken(),
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  const text = await res.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  return { status: res.status, json };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1000, TRACK17_TIMEOUT_MS));
+  const started = Date.now();
+  try {
+    const res = await fetch(`${API}${path}`, {
+      method: "POST",
+      headers: {
+        "17token": getToken(),
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+    const durationMs = Date.now() - started;
+    const apiCode = json && typeof json === "object" && json.code !== undefined ? json.code : null;
+    const level = res.ok ? "info" : "warn";
+    logAt(level, "api_call_done", {
+      path,
+      status: res.status,
+      duration_ms: durationMs,
+      api_code: apiCode
+    });
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      json,
+      raw: text
+    };
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      logAt("error", "api_call_timeout", {
+        path,
+        timeout_ms: Math.max(1000, TRACK17_TIMEOUT_MS)
+      });
+      throw new Error(`17Track timeout after ${Math.max(1000, TRACK17_TIMEOUT_MS)}ms`);
+    }
+    logAt("error", "api_call_failed", {
+      path,
+      error: String(e.message || e)
+    });
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function getTrackInfo(number, carrier) {
-  const payload = carrier
-    ? [{ number, carrier }]
-    : [{ number }];
+  const normalizedNumber = String(number || "").trim().toUpperCase();
+  const carrierNum = carrier !== undefined && carrier !== null && carrier !== ""
+    ? Number(carrier)
+    : undefined;
+  const payload = Number.isFinite(carrierNum)
+    ? [{ number: normalizedNumber, carrier: carrierNum }]
+    : [{ number: normalizedNumber }];
   return post("/gettrackinfo", payload);
 }
 
 async function register(number, carrier) {
-  const payload = carrier
-    ? [{ number, carrier }]
-    : [{ number }];
+  const normalizedNumber = String(number || "").trim().toUpperCase();
+  const carrierNum = carrier !== undefined && carrier !== null && carrier !== ""
+    ? Number(carrier)
+    : undefined;
+  const payload = Number.isFinite(carrierNum)
+    ? [{ number: normalizedNumber, carrier: carrierNum }]
+    : [{ number: normalizedNumber }];
   return post("/register", payload);
 }
 

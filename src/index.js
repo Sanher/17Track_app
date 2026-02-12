@@ -1,5 +1,5 @@
 const express = require("express");
-const { readJson, writeJson } = require("./storage");
+const { readJson, writeJson, DATA_DIR } = require("./storage");
 const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./track17");
 const { CARRIERS } = require("./carriers");
 
@@ -344,14 +344,108 @@ function getOwner(store, owner) {
   return o && typeof o === "object" ? o : null;
 }
 
+function normalizeTracking(tn) {
+  return String(tn || "").trim().toUpperCase();
+}
+
+function ensureOwnerShape(store, owner) {
+  store.owners = store.owners && typeof store.owners === "object" ? store.owners : {};
+  store.owners[owner] = store.owners[owner] && typeof store.owners[owner] === "object"
+    ? store.owners[owner]
+    : {};
+
+  const o = store.owners[owner];
+  const normalizedTrackings = Array.isArray(o.trackings)
+    ? o.trackings.map((x) => normalizeTracking(x)).filter(Boolean)
+    : [];
+  o.trackings = [...new Set(normalizedTrackings)];
+  o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
+  o.last = o.last && typeof o.last === "object" ? o.last : {};
+  return o;
+}
+
 function getMeta(o) {
   return o && o.meta && typeof o.meta === "object" ? o.meta : {};
 }
 
 function getTrackingMeta(o, tn) {
   const meta = getMeta(o);
-  const m = meta?.[tn];
-  return m && typeof m === "object" ? m : {};
+  const key = normalizeTracking(tn);
+  const m = meta?.[key];
+  if (m && typeof m === "object") return m;
+
+  // Back-compat for older stores with non-normalized keys.
+  for (const k of Object.keys(meta)) {
+    if (normalizeTracking(k) === key) {
+      const hit = meta[k];
+      return hit && typeof hit === "object" ? hit : {};
+    }
+  }
+
+  return {};
+}
+
+function setTrackingMeta(o, tn, nextMeta) {
+  const key = normalizeTracking(tn);
+  o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
+  // Remove older variants of the same tracking key (case/spaces) to avoid duplicates.
+  for (const k of Object.keys(o.meta)) {
+    if (normalizeTracking(k) === key && k !== key) delete o.meta[k];
+  }
+  o.meta[key] = nextMeta && typeof nextMeta === "object" ? nextMeta : {};
+}
+
+function ownerLastMap(o) {
+  const raw = o?.last && typeof o.last === "object" ? o.last : {};
+  const normalized = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const nk = normalizeTracking(k);
+    if (nk) normalized[nk] = v;
+  }
+  return normalized;
+}
+
+function deleteTrackingFromMap(mapObj, tracking) {
+  if (!mapObj || typeof mapObj !== "object") return 0;
+  const key = normalizeTracking(tracking);
+  let removed = 0;
+  for (const k of Object.keys(mapObj)) {
+    if (normalizeTracking(k) === key) {
+      delete mapObj[k];
+      removed++;
+    }
+  }
+  return removed;
+}
+
+function ownerIsEmpty(o) {
+  const tCount = Array.isArray(o?.trackings) ? o.trackings.length : 0;
+  const mCount = o?.meta && typeof o.meta === "object" ? Object.keys(o.meta).length : 0;
+  const lCount = o?.last && typeof o.last === "object" ? Object.keys(o.last).length : 0;
+  return tCount === 0 && mCount === 0 && lCount === 0;
+}
+
+function resolveCarrierKey(aliasOrKey) {
+  const raw = String(aliasOrKey || "").trim();
+  if (!raw) return undefined;
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const alias = raw.toLowerCase();
+  return CARRIERS_MAP?.[alias];
+}
+
+function boolFromAny(v, def = false) {
+  if (v === undefined || v === null || v === "") return def;
+  if (typeof v === "boolean") return v;
+  const s = String(v).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(s)) return true;
+  if (["0", "false", "no", "n", "off"].includes(s)) return false;
+  return def;
+}
+
+function getBodyOrQuery(req, key) {
+  if (req.body && req.body[key] !== undefined) return req.body[key];
+  if (req.query && req.query[key] !== undefined) return req.query[key];
+  return undefined;
 }
 
 // Returns effective delivered flag, honoring manual override if present.
@@ -369,11 +463,7 @@ function effectiveIsOutForDelivery(one) {
 // ---- Pending detection and refresh policy helpers ----
 
 function ownerTrackings(o) {
-  return Array.isArray(o?.trackings) ? o.trackings.map((x) => String(x || "").trim().toUpperCase()).filter(Boolean) : [];
-}
-
-function ownerLastMap(o) {
-  return o?.last && typeof o.last === "object" ? o.last : {};
+  return Array.isArray(o?.trackings) ? o.trackings.map((x) => normalizeTracking(x)).filter(Boolean) : [];
 }
 
 // Returns list of tracking numbers that are NOT delivered (honoring delivered_override).
@@ -639,22 +729,71 @@ app.get("/api/store", (_req, res) => {
   res.json(loadStore());
 });
 
-app.post("/api/owner/:owner/tracking", (req, res) => {
+app.post("/api/owner/:owner/tracking", async (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
-  const tracking = String(req.body?.tracking || "").trim().toUpperCase();
+  const tracking = normalizeTracking(req.body?.tracking || req.query?.tracking || "");
   const note = String(req.body?.note || "").trim();
+  const carrierAlias = String(req.body?.carrier_alias || req.query?.carrier_alias || "").trim();
+  const carrier = resolveCarrierKey(req.body?.carrier || req.query?.carrier || carrierAlias);
+  const registerOnAdd = boolFromAny(getBodyOrQuery(req, "register_on_add"), true);
+  const registerStrict = boolFromAny(getBodyOrQuery(req, "register_strict"), false);
 
   if (!owner || !tracking) return res.status(400).json({ error: "owner y tracking son obligatorios" });
 
   const store = loadStore();
-  store.owners[owner] = store.owners[owner] || { trackings: [], meta: {} };
-  const o = store.owners[owner];
+  const o = ensureOwnerShape(store, owner);
 
   if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
-  if (note) o.meta[tracking] = { ...(o.meta[tracking] || {}), note };
+  if (note) {
+    const prev = getTrackingMeta(o, tracking);
+    setTrackingMeta(o, tracking, { ...prev, note });
+  }
+
+  let registerResult = null;
+  if (registerOnAdd) {
+    try {
+      const r = await register(tracking, carrier);
+      const apiCode = Number(r?.json?.code);
+      const accepted = Array.isArray(r?.json?.data?.accepted) ? r.json.data.accepted.length : 0;
+      const rejected = Array.isArray(r?.json?.data?.rejected) ? r.json.data.rejected.length : 0;
+      const registerOk = apiCode === 0 && rejected === 0;
+      registerResult = {
+        ok: registerOk,
+        carrier: carrier ?? null,
+        status: r?.status ?? null,
+        api_code: Number.isFinite(apiCode) ? apiCode : null,
+        accepted,
+        rejected,
+        response: r?.json ?? null
+      };
+      if (!registerOk && registerStrict) {
+        return res.status(502).json({
+          ok: false,
+          owner,
+          tracking,
+          note,
+          error: "register_rejected",
+          register: registerResult
+        });
+      }
+    } catch (e) {
+      const err = String(e.message || e);
+      registerResult = { ok: false, carrier: carrier ?? null, error: err };
+      if (registerStrict) {
+        return res.status(502).json({
+          ok: false,
+          owner,
+          tracking,
+          note,
+          error: "register_failed",
+          register: registerResult
+        });
+      }
+    }
+  }
 
   saveStore(store);
-  res.json({ ok: true, owner, tracking, note });
+  res.json({ ok: true, owner, tracking, note, register: registerResult });
 });
 
 // Set or clear a manual delivered override for a tracking number.
@@ -685,17 +824,32 @@ app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
 
 app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
-  const tracking = String(req.params.tracking || "").trim().toUpperCase();
+  const tracking = normalizeTracking(req.params.tracking);
 
   const store = loadStore();
   const o = store.owners[owner];
-  if (!o) return res.json({ ok: true });
+  if (!o) {
+    return res.json({ ok: true, owner, tracking, removed: false, removed_count: 0, reason: "owner_not_found" });
+  }
 
-  o.trackings = (o.trackings || []).filter((x) => x !== tracking);
-  if (o.meta && o.meta[tracking]) delete o.meta[tracking];
+  const before = ownerTrackings(o);
+  o.trackings = before.filter((x) => normalizeTracking(x) !== tracking);
+  const removedFromTrackings = before.length - o.trackings.length;
+  const removedFromMeta = deleteTrackingFromMap(o.meta, tracking);
+  const removedFromLast = deleteTrackingFromMap(o.last, tracking);
+
+  if (ownerIsEmpty(o)) delete store.owners[owner];
 
   saveStore(store);
-  res.json({ ok: true, owner, tracking });
+  res.json({
+    ok: true,
+    owner,
+    tracking,
+    removed: removedFromTrackings > 0,
+    removed_count: removedFromTrackings,
+    removed_meta: removedFromMeta,
+    removed_last: removedFromLast
+  });
 });
 
 app.post("/api/track/refresh", async (req, res) => {
@@ -936,5 +1090,6 @@ function startBackgroundIfEnabled() {
 const port = process.env.PORT || 8787;
 app.listen(port, () => {
   console.log(`17Track app listening on ${port}`);
+  console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
   startBackgroundIfEnabled();
 });

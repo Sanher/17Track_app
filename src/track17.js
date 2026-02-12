@@ -1,4 +1,5 @@
 const API = "https://api.17track.net/track/v2.2";
+const TRACK17_TIMEOUT_MS = Number(process.env.TRACK17_TIMEOUT_MS || 15000);
 
 function getToken() {
   const t = process.env.TRACK17_TOKEN || "";
@@ -7,32 +8,59 @@ function getToken() {
 }
 
 async function post(path, body) {
-  const res = await fetch(`${API}${path}`, {
-    method: "POST",
-    headers: {
-      "17token": getToken(),
-      "Content-Type": "application/json",
-      "Accept": "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  const text = await res.text();
-  let json;
-  try { json = JSON.parse(text); } catch { json = { raw: text }; }
-  return { status: res.status, json };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1000, TRACK17_TIMEOUT_MS));
+  try {
+    const res = await fetch(`${API}${path}`, {
+      method: "POST",
+      headers: {
+        "17token": getToken(),
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      json,
+      raw: text
+    };
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      throw new Error(`17Track timeout after ${Math.max(1000, TRACK17_TIMEOUT_MS)}ms`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function getTrackInfo(number, carrier) {
-  const payload = carrier
-    ? [{ number, carrier }]
-    : [{ number }];
+  const normalizedNumber = String(number || "").trim().toUpperCase();
+  const carrierNum = carrier !== undefined && carrier !== null && carrier !== ""
+    ? Number(carrier)
+    : undefined;
+  const payload = Number.isFinite(carrierNum)
+    ? [{ number: normalizedNumber, carrier: carrierNum }]
+    : [{ number: normalizedNumber }];
   return post("/gettrackinfo", payload);
 }
 
 async function register(number, carrier) {
-  const payload = carrier
-    ? [{ number, carrier }]
-    : [{ number }];
+  const normalizedNumber = String(number || "").trim().toUpperCase();
+  const carrierNum = carrier !== undefined && carrier !== null && carrier !== ""
+    ? Number(carrier)
+    : undefined;
+  const payload = Number.isFinite(carrierNum)
+    ? [{ number: normalizedNumber, carrier: carrierNum }]
+    : [{ number: normalizedNumber }];
   return post("/register", payload);
 }
 

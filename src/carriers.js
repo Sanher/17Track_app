@@ -9,6 +9,10 @@ const CARRIERS = {
     correos_express: { key: 100048, name: "Correos Express" },
     seur: { key: 100438, name: "Seur" },
     mrw: { key: 100175, name: "MRW" },
+    tipsa: { key: 100185, name: "TIPSA" },
+    asm: { key: 100189, name: "GLS Spain (National) (ASM)" },
+    asmred: { key: 100341, name: "Redur (ASM Red)" },
+    asm_red: { key: 100341, name: "Redur (ASM Red)" },
     gls_es: { key: 100189, name: "GLS Spain (National)" },
 
     cainiao: { key: 190271, name: "Cainiao" },

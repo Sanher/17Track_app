@@ -121,6 +121,181 @@ const CARRIERS_MAP = Object.fromEntries(
 
 // Expose the full carriers object so clients can show friendly names.
 app.get("/api/carriers", (_req, res) => res.json({ carriers: CARRIERS }));
+
+const TRACK17_CARRIERS_CSV_URL = "https://res.17track.net/asset/carrier/info/apicarrier.all.csv";
+const CARRIERS_17TRACK_CACHE_TTL_MS = Number(process.env.CARRIERS_17TRACK_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
+const CARRIERS_17TRACK_FETCH_TIMEOUT_MS = Number(process.env.CARRIERS_17TRACK_FETCH_TIMEOUT_MS || 12000);
+const carriers17TrackCache = {
+  fetched_at: null,
+  items: [],
+  loading: null
+};
+
+function normalizeAliasText(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function parseCsvLine(line) {
+  const out = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\"") {
+      if (inQuotes && line[i + 1] === "\"") {
+        cur += "\"";
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (ch === "," && !inQuotes) {
+      out.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function parseTrack17CarriersCsv(csvRaw) {
+  const lines = String(csvRaw || "")
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (lines.length <= 1) return [];
+
+  const items = [];
+  for (let i = 1; i < lines.length; i++) {
+    const row = parseCsvLine(lines[i]);
+    if (!row.length) continue;
+    const keyNum = Number(row[0]);
+    const nameEn = String(row[1] || "").trim();
+    const nameCn = String(row[2] || "").trim();
+    const nameHk = String(row[3] || "").trim();
+    const url = String(row[4] || "").trim();
+    if (!Number.isFinite(keyNum) || !nameEn) continue;
+
+    const alias = normalizeAliasText(nameEn);
+    const baseAlias = normalizeAliasText(
+      nameEn
+        .replace(/\([^)]*\)/g, " ")
+        .split(/[\s-]+/)[0]
+    );
+
+    items.push({
+      key: keyNum,
+      alias,
+      base_alias: baseAlias,
+      name_en: nameEn,
+      name_cn: nameCn || null,
+      name_hk: nameHk || null,
+      url: url || null
+    });
+  }
+  return items;
+}
+
+async function load17TrackCarriersCached(forceRefresh = false) {
+  const now = Date.now();
+  const ttlMs = Number.isFinite(CARRIERS_17TRACK_CACHE_TTL_MS) && CARRIERS_17TRACK_CACHE_TTL_MS > 0
+    ? CARRIERS_17TRACK_CACHE_TTL_MS
+    : 24 * 60 * 60 * 1000;
+
+  const cacheValid = carriers17TrackCache.fetched_at && (now - carriers17TrackCache.fetched_at.getTime() < ttlMs);
+  if (!forceRefresh && cacheValid && carriers17TrackCache.items.length > 0) {
+    return carriers17TrackCache.items;
+  }
+
+  if (carriers17TrackCache.loading) {
+    return carriers17TrackCache.loading;
+  }
+
+  carriers17TrackCache.loading = (async () => {
+    const timeoutMs = Number.isFinite(CARRIERS_17TRACK_FETCH_TIMEOUT_MS) && CARRIERS_17TRACK_FETCH_TIMEOUT_MS > 0
+      ? CARRIERS_17TRACK_FETCH_TIMEOUT_MS
+      : 12000;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const r = await fetch(TRACK17_CARRIERS_CSV_URL, { signal: controller.signal });
+      if (!r.ok) {
+        throw new Error(`carriers_csv_fetch_failed_${r.status}`);
+      }
+      const txt = await r.text();
+      const parsed = parseTrack17CarriersCsv(txt);
+      carriers17TrackCache.items = parsed;
+      carriers17TrackCache.fetched_at = new Date();
+      return parsed;
+    } catch (e) {
+      if (carriers17TrackCache.items.length > 0) {
+        logAt("warn", "carriers_cached_source_failed_using_stale", {
+          error: String(e.message || e),
+          stale_items: carriers17TrackCache.items.length
+        });
+        return carriers17TrackCache.items;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
+
+  try {
+    return await carriers17TrackCache.loading;
+  } finally {
+    carriers17TrackCache.loading = null;
+  }
+}
+
+app.get("/api/carriers/17track_cached", async (req, res) => {
+  const qRaw = String(req.query?.q || "").trim();
+  const q = normalizeAliasText(qRaw);
+  const rawLimit = Number(req.query?.limit);
+  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, rawLimit)) : 100;
+  const refresh = String(req.query?.refresh || "").toLowerCase() === "true";
+  const ttlMs = Number.isFinite(CARRIERS_17TRACK_CACHE_TTL_MS) && CARRIERS_17TRACK_CACHE_TTL_MS > 0
+    ? CARRIERS_17TRACK_CACHE_TTL_MS
+    : 24 * 60 * 60 * 1000;
+
+  try {
+    const items = await load17TrackCarriersCached(refresh);
+    let filtered = items;
+    if (q) {
+      filtered = items.filter((it) =>
+        it.alias.includes(q) ||
+        it.base_alias.includes(q) ||
+        normalizeAliasText(it.name_en).includes(q)
+      );
+    }
+
+    const out = filtered
+      .sort((a, b) => a.key - b.key)
+      .slice(0, limit);
+
+    return res.json({
+      ok: true,
+      source: "17track_csv_cached",
+      query: qRaw || null,
+      total: filtered.length,
+      count: out.length,
+      cache_ttl_ms: ttlMs,
+      fetched_at: carriers17TrackCache.fetched_at ? carriers17TrackCache.fetched_at.toISOString() : null,
+      items: out
+    });
+  } catch (e) {
+    return res.status(502).json({
+      ok: false,
+      error: "carriers_source_unavailable",
+      message: String(e.message || e)
+    });
+  }
+});
 // ---- Background scheduler (Step 3) ----
 // Enable with: BG_ENABLED=1
 // Interval: BG_INTERVAL_MIN (default 15)
@@ -260,7 +435,8 @@ async function refreshOwnerPolicy(o, ownerKey, now, opts) {
     const tn = trackings[i];
 
     try {
-      const { json } = await getTrackInfo(tn);
+      const carrier = trackingPreferredCarrier(o, tn);
+      const { json } = await getTrackInfo(tn, carrier);
       const norm = normalizeGetTrackInfoResponse(json);
       const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
 
@@ -536,6 +712,16 @@ function resolveCarrierKey(aliasOrKey) {
   return CARRIERS_MAP?.[alias];
 }
 
+function metaCarrierKey(meta) {
+  const n = Number(meta?.carrier_key);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function trackingPreferredCarrier(o, tn) {
+  const meta = getTrackingMeta(o, tn);
+  return metaCarrierKey(meta);
+}
+
 function boolFromAny(v, def = false) {
   if (v === undefined || v === null || v === "") return def;
   if (typeof v === "boolean") return v;
@@ -781,6 +967,7 @@ app.get("/api/owner/:owner/trackings", (req, res) => {
     return {
       tracking: tn,
       note: String(meta?.note || "").trim() || "",
+      carrier_override: metaCarrierKey(meta) ?? null,
       delivered_override,
       delivered_effective: effectiveIsDelivered(last?.[tn], meta),
       out_for_delivery: effectiveIsOutForDelivery(last?.[tn]),
@@ -821,6 +1008,7 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
     note: hit.note || "",
     score: hit.score,
     matches: matches.map((m) => ({ tracking: m.tracking, note: m.note || "", score: m.score })),
+    carrier_override: metaCarrierKey(meta) ?? null,
     delivered_override,
     delivered_effective: effectiveIsDelivered(last?.[hit.tracking], meta),
     out_for_delivery: effectiveIsOutForDelivery(last?.[hit.tracking]),
@@ -857,7 +1045,14 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
   if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
   if (note) {
     const prev = getTrackingMeta(o, tracking);
-    setTrackingMeta(o, tracking, { ...prev, note });
+    setTrackingMeta(o, tracking, {
+      ...prev,
+      note,
+      ...(Number.isFinite(carrier) ? { carrier_key: carrier } : {})
+    });
+  } else if (Number.isFinite(carrier)) {
+    const prev = getTrackingMeta(o, tracking);
+    setTrackingMeta(o, tracking, { ...prev, carrier_key: carrier });
   }
 
   let registerResult = null;
@@ -950,6 +1145,81 @@ app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
     delivered_override: o.meta[tracking].delivered_override ?? null
   });
   return res.json({ ok: true, owner, tracking, delivered_override: o.meta[tracking].delivered_override ?? null });
+});
+
+// Set or clear a preferred carrier for a tracking.
+// Body:
+// - { carrier: 100189 } or { carrier_alias: "gls_es" } => set preferred carrier
+// - { carrier: null } or { carrier_alias: "" } => clear preferred carrier
+app.post("/api/owner/:owner/tracking/:tracking/carrier", async (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const tracking = normalizeTracking(req.params.tracking);
+
+  const bodyCarrierRaw = req.body?.carrier;
+  const bodyAliasRaw = req.body?.carrier_alias;
+  const clearRequested =
+    bodyCarrierRaw === null ||
+    (bodyCarrierRaw !== undefined && String(bodyCarrierRaw).trim() === "") ||
+    (bodyAliasRaw !== undefined && String(bodyAliasRaw).trim() === "");
+
+  const resolvedCarrier = clearRequested ? undefined : resolveCarrierKey(
+    bodyCarrierRaw !== undefined ? bodyCarrierRaw : bodyAliasRaw
+  );
+  if (!clearRequested && !Number.isFinite(resolvedCarrier)) {
+    return res.status(400).json({
+      ok: false,
+      owner,
+      tracking,
+      error: "invalid_carrier",
+      message: "Usa carrier numérico o alias válido (ej: gls_es, dpd, tipsa, asmred)."
+    });
+  }
+
+  const store = loadStore();
+  const o = ensureOwnerShape(store, owner);
+  if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
+
+  const prev = getTrackingMeta(o, tracking);
+  const next = { ...prev };
+  if (clearRequested) delete next.carrier_key;
+  else next.carrier_key = resolvedCarrier;
+  setTrackingMeta(o, tracking, next);
+
+  let refreshed = false;
+  let refresh_error = null;
+  let refresh_one = null;
+  try {
+    const preferred = trackingPreferredCarrier(o, tracking);
+    const { json } = await getTrackInfo(tracking, preferred);
+    const norm = normalizeGetTrackInfoResponse(json);
+    const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
+    o.last = o.last || {};
+    o.last[tracking] = one || { number: tracking, latest: null, flags: null, error: norm.ok ? null : norm.error };
+    refresh_one = one ? shortOne(one) : null;
+    refreshed = true;
+  } catch (e) {
+    refresh_error = String(e.message || e);
+  }
+
+  saveStore(store);
+  logAt("info", "tracking_carrier_updated", {
+    req_id: req.reqId,
+    owner,
+    tracking,
+    carrier_override: clearRequested ? null : resolvedCarrier,
+    refreshed,
+    refresh_error
+  });
+
+  return res.json({
+    ok: true,
+    owner,
+    tracking,
+    carrier_override: clearRequested ? null : resolvedCarrier,
+    refreshed,
+    refresh_error,
+    one: refresh_one
+  });
 });
 
 app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
@@ -1107,7 +1377,8 @@ app.post("/api/owner/:owner/refresh", async (req, res) => {
     if (!tn) continue;
 
     try {
-      const { json } = await getTrackInfo(tn);
+      const carrier = trackingPreferredCarrier(o, tn);
+      const { json } = await getTrackInfo(tn, carrier);
       const norm = normalizeGetTrackInfoResponse(json);
 
       // norm.accepted[0] contiene el estado normalizado
@@ -1160,7 +1431,8 @@ app.post("/api/owner/:owner/refresh_if_needed", async (req, res) => {
   for (let i = 0; i < trackings.length; i++) {
     const tn = trackings[i];
     try {
-      const { json } = await getTrackInfo(tn);
+      const carrier = trackingPreferredCarrier(o, tn);
+      const { json } = await getTrackInfo(tn, carrier);
       const norm = normalizeGetTrackInfoResponse(json);
       const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
 
@@ -1206,7 +1478,8 @@ app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {
     if (!tn) continue;
 
     try {
-      const { json } = await getTrackInfo(tn);
+      const carrier = trackingPreferredCarrier(o, tn);
+      const { json } = await getTrackInfo(tn, carrier);
       const norm = normalizeGetTrackInfoResponse(json);
       const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
 

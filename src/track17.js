@@ -143,19 +143,49 @@ function normalizeAccepted(a0) {
     String(pick(a0, "track_info.tracking.providers.0.provider.country", "")).trim();
 
   const latestStatus =
-    String(pick(a0, "track_info.shipping_info.latest_status.status", "")).trim();
+    String(
+      pick(
+        a0,
+        "track_info.latest_status.status",
+        pick(a0, "track_info.shipping_info.latest_status.status", "")
+      )
+    ).trim();
 
   const latestSub =
-    String(pick(a0, "track_info.shipping_info.latest_status.sub_status", "")).trim();
+    String(
+      pick(
+        a0,
+        "track_info.latest_status.sub_status",
+        pick(a0, "track_info.shipping_info.latest_status.sub_status", "")
+      )
+    ).trim();
 
   const latestDesc =
-    String(pick(a0, "track_info.shipping_info.latest_event.description", "")).trim();
+    String(
+      pick(
+        a0,
+        "track_info.latest_event.description",
+        pick(a0, "track_info.shipping_info.latest_event.description", "")
+      )
+    ).trim();
 
   const latestTime =
-    String(pick(a0, "track_info.shipping_info.latest_event.time_iso", "")).trim();
+    String(
+      pick(
+        a0,
+        "track_info.latest_event.time_iso",
+        pick(a0, "track_info.shipping_info.latest_event.time_iso", "")
+      )
+    ).trim();
 
   const latestLoc =
-    String(pick(a0, "track_info.shipping_info.latest_event.location", "")).trim();
+    String(
+      pick(
+        a0,
+        "track_info.latest_event.location",
+        pick(a0, "track_info.shipping_info.latest_event.location", "")
+      )
+    ).trim();
 
   // Heurística “en reparto”
   const d = latestDesc.toLowerCase();

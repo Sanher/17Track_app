@@ -111,7 +111,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
-app.get("/api/_build", (_req, res) => res.json({ ok: true, build: "v0.3.2", has_trackings: true }));
+app.get("/api/_build", (_req, res) => res.json({ ok: true, build: "v0.3.3", has_trackings: true }));
 
 // Carriers live in ./carriers.js for easier maintenance (names + keys).
 // CARRIERS: { alias: { key, name }, ... }

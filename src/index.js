@@ -7,6 +7,25 @@ const STORE_FILE = "store.json";
 const APP_LOG_LEVEL = String(process.env.APP_LOG_LEVEL || "info").trim().toLowerCase();
 const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function localIsoWithOffset(d = new Date()) {
+  const y = d.getFullYear();
+  const m = pad2(d.getMonth() + 1);
+  const day = pad2(d.getDate());
+  const hh = pad2(d.getHours());
+  const mm = pad2(d.getMinutes());
+  const ss = pad2(d.getSeconds());
+  const offsetMin = -d.getTimezoneOffset();
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const offAbs = Math.abs(offsetMin);
+  const offH = pad2(Math.floor(offAbs / 60));
+  const offM = pad2(offAbs % 60);
+  return `${y}-${m}-${day}T${hh}:${mm}:${ss}${sign}${offH}:${offM}`;
+}
+
 /**
  * store.json structure (persisted in DATA_DIR/store.json)
  *
@@ -52,8 +71,12 @@ function logAt(level, message, extra = {}) {
   const target = LOG_LEVELS[level] ?? LOG_LEVELS.info;
   const current = LOG_LEVELS[APP_LOG_LEVEL] ?? LOG_LEVELS.info;
   if (target < current) return;
+  const now = new Date();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || process.env.TZ || "local";
   const payload = {
-    ts: new Date().toISOString(),
+    ts_utc: now.toISOString(),
+    ts_local: localIsoWithOffset(now),
+    timezone,
     level,
     msg: message,
     ...extra
@@ -88,7 +111,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
-app.get("/api/_build", (_req, res) => res.json({ ok: true, build: "v0.2.3", has_trackings: true }));
+app.get("/api/_build", (_req, res) => res.json({ ok: true, build: "v0.3.2", has_trackings: true }));
 
 // Carriers live in ./carriers.js for easier maintenance (names + keys).
 // CARRIERS: { alias: { key, name }, ... }

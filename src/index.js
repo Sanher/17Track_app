@@ -143,6 +143,7 @@ const BG_DELAY_MS = Number(process.env.BG_DELAY_MS || 5000);
 const HA_URL = String(process.env.HA_URL || "").trim().replace(/\/$/, "");
 const HA_TOKEN = String(process.env.HA_TOKEN || "").trim();
 const HA_SCRIPT = String(process.env.HA_SCRIPT || "jarvis_17track_notify").trim();
+const TRACK17_TOKEN = String(process.env.TRACK17_TOKEN || "").trim();
 
 async function callHAService(domain, service, data) {
   if (!HA_URL || !HA_TOKEN) {
@@ -184,6 +185,37 @@ const bgState = {
   lastError: null,
   lastSummary: null
 };
+
+function isPositiveNumber(n) {
+  return Number.isFinite(n) && n > 0;
+}
+
+function validateStartupConfig() {
+  const missing = [];
+  if (!TRACK17_TOKEN) missing.push("TRACK17_TOKEN");
+  if (!HA_URL) missing.push("HA_URL");
+  if (!HA_TOKEN) missing.push("HA_TOKEN");
+  if (!HA_SCRIPT) missing.push("HA_SCRIPT");
+
+  const invalid = [];
+  if (!isPositiveNumber(Number(process.env.PORT || 8787))) invalid.push("PORT");
+  if (!isPositiveNumber(BG_INTERVAL_MIN)) invalid.push("BG_INTERVAL_MIN");
+  if (!isPositiveNumber(BG_NORMAL_INTERVAL_MIN)) invalid.push("BG_NORMAL_INTERVAL_MIN");
+  if (!isPositiveNumber(BG_DELAY_MS)) invalid.push("BG_DELAY_MS");
+
+  const allowedLogLevels = new Set(Object.keys(LOG_LEVELS));
+  if (!allowedLogLevels.has(APP_LOG_LEVEL)) invalid.push("APP_LOG_LEVEL");
+
+  if (missing.length || invalid.length) {
+    const details = {
+      missing,
+      invalid,
+      hint: "Revisa la configuración del add-on y completa todos los campos requeridos."
+    };
+    console.error(`[BOOT] Invalid configuration: ${JSON.stringify(details)}`);
+    process.exit(1);
+  }
+}
 function ownersFromStore(store) {
   const owners = store?.owners && typeof store.owners === "object" ? store.owners : {};
   return Object.keys(owners);
@@ -1219,6 +1251,7 @@ function startBackgroundIfEnabled() {
 }
 
 const port = process.env.PORT || 8787;
+validateStartupConfig();
 app.listen(port, () => {
   console.log(`17Track app listening on ${port}`);
   console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);

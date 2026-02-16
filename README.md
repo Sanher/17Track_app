@@ -35,7 +35,7 @@ Por defecto escucha en `8787`.
 
 Background refresher:
 
-- `BG_ENABLED` (`1` para activar).
+- `BG_ENABLED` (`1|true|yes|on` para activar).
 - `BG_INTERVAL_MIN` (default `15`).
 - `BG_NORMAL_INTERVAL_MIN` (default `45`).
 - `BG_SLOW_HOURS` (CSV, default `"8,20"`).
@@ -78,6 +78,12 @@ curl -X DELETE http://localhost:8787/api/owner/david/tracking/PH7NAW040990190G
 ## Persistencia
 
 El estado se guarda en `DATA_DIR/store.json`.
+
+## Troubleshooting de refresco
+
+- Si `GET /api/bg/status` devuelve `enabled=false`, no hay refresco automático.
+- Activa `BG_ENABLED` en la config del add-on y reinicia.
+- Puedes arrancarlo manualmente para diagnóstico con `POST /api/bg/start`.
 
 ## Estado del proyecto
 

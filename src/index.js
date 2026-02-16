@@ -6,6 +6,7 @@ const { CARRIERS } = require("./carriers");
 const STORE_FILE = "store.json";
 const APP_LOG_LEVEL = String(process.env.APP_LOG_LEVEL || "info").trim().toLowerCase();
 const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+const APP_VERSION = `v${String(require("../package.json")?.version || "0.0.0")}`;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -111,7 +112,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
-app.get("/api/_build", (_req, res) => res.json({ ok: true, build: "v0.3.4", has_trackings: true }));
+app.get("/api/_build", (_req, res) => res.json({ ok: true, build: APP_VERSION, has_trackings: true }));
 
 // Carriers live in ./carriers.js for easier maintenance (names + keys).
 // CARRIERS: { alias: { key, name }, ... }
@@ -297,7 +298,7 @@ app.get("/api/carriers/17track_cached", async (req, res) => {
   }
 });
 // ---- Background scheduler (Step 3) ----
-// Enable with: BG_ENABLED=1
+// Enable with: BG_ENABLED=1 (also accepts true/yes/on)
 // Interval: BG_INTERVAL_MIN (default 15)
 // Refresh policy: BG_NORMAL_INTERVAL_MIN (default 45), BG_SLOW_HOURS (default "8,20")
 // Rate limit between trackings: BG_DELAY_MS (default 5000)
@@ -306,7 +307,8 @@ app.get("/api/carriers/17track_cached", async (req, res) => {
 //   HA_TOKEN (Long-Lived Access Token)
 //   HA_SCRIPT (script entity/service name without domain, default: jarvis_17track_notify)
 
-const BG_ENABLED = String(process.env.BG_ENABLED || "").trim() === "1";
+const BG_ENABLED_RAW = process.env.BG_ENABLED;
+const BG_ENABLED = boolFromAny(BG_ENABLED_RAW, false);
 const BG_INTERVAL_MIN = Number(process.env.BG_INTERVAL_MIN || 15);
 const BG_NORMAL_INTERVAL_MIN = Number(process.env.BG_NORMAL_INTERVAL_MIN || 45);
 const BG_SLOW_HOURS = String(process.env.BG_SLOW_HOURS || "8,20")
@@ -390,6 +392,17 @@ function validateStartupConfig() {
     console.error(`[BOOT] Invalid configuration: ${JSON.stringify(details)}`);
     process.exit(1);
   }
+
+  logAt("info", "startup_config_ok", {
+    app_version: APP_VERSION,
+    bg_enabled: BG_ENABLED,
+    bg_enabled_raw: BG_ENABLED_RAW ?? null,
+    bg_interval_min: BG_INTERVAL_MIN,
+    bg_normal_interval_min: BG_NORMAL_INTERVAL_MIN,
+    bg_slow_hours: BG_SLOW_HOURS,
+    bg_delay_ms: BG_DELAY_MS,
+    ha_configured: !!(HA_URL && HA_TOKEN)
+  });
 }
 function ownersFromStore(store) {
   const owners = store?.owners && typeof store.owners === "object" ? store.owners : {};
@@ -1507,7 +1520,14 @@ app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {
 });
 
 function startBackgroundIfEnabled() {
-  if (!BG_ENABLED) return;
+  if (!BG_ENABLED) {
+    logAt("warn", "bg_scheduler_disabled_by_config", {
+      bg_enabled: BG_ENABLED,
+      bg_enabled_raw: BG_ENABLED_RAW ?? null,
+      hint: "Configura BG_ENABLED con 1/true/yes/on para activar refresco automático."
+    });
+    return;
+  }
   if (bgState.intervalId) return;
 
   // Run once shortly after boot (helps after restarts / power cuts).
@@ -1520,7 +1540,12 @@ function startBackgroundIfEnabled() {
   }, Math.max(1, BG_INTERVAL_MIN) * 60 * 1000);
 
   bgState.enabled = true;
-  console.log(`[BG] enabled. interval=${BG_INTERVAL_MIN}min normal=${BG_NORMAL_INTERVAL_MIN}min slowHours=${BG_SLOW_HOURS.join(",")}`);
+  logAt("info", "bg_scheduler_enabled", {
+    interval_min: BG_INTERVAL_MIN,
+    normal_interval_min: BG_NORMAL_INTERVAL_MIN,
+    slow_hours: BG_SLOW_HOURS,
+    delay_ms: BG_DELAY_MS
+  });
 }
 
 const port = process.env.PORT || 8787;
@@ -1529,5 +1554,6 @@ app.listen(port, () => {
   console.log(`17Track app listening on ${port}`);
   console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
   console.log(`[APP] log level: ${APP_LOG_LEVEL}`);
+  console.log(`[APP] version: ${APP_VERSION}`);
   startBackgroundIfEnabled();
 });

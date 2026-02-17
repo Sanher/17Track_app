@@ -302,6 +302,7 @@ app.get("/api/carriers/17track_cached", async (req, res) => {
 // Interval: BG_INTERVAL_MIN (default 15)
 // Refresh policy: BG_NORMAL_INTERVAL_MIN (default 45), BG_SLOW_HOURS (default "8,20")
 // Rate limit between trackings: BG_DELAY_MS (default 5000)
+// Delivered retention: DELIVERED_RETENTION_DAYS (default 7, <=0 disables auto-removal)
 // Home Assistant notify target:
 //   HA_URL (e.g. http://homeassistant:8123 or http://192.168.x.x:8123)
 //   HA_TOKEN (Long-Lived Access Token)
@@ -316,6 +317,7 @@ const BG_SLOW_HOURS = String(process.env.BG_SLOW_HOURS || "8,20")
   .map((x) => Number(String(x).trim()))
   .filter((n) => !isNaN(n));
 const BG_DELAY_MS = Number(process.env.BG_DELAY_MS || 5000);
+const DELIVERED_RETENTION_DAYS = Number(process.env.DELIVERED_RETENTION_DAYS || 7);
 
 const HA_URL = String(process.env.HA_URL || "").trim().replace(/\/$/, "");
 const HA_TOKEN = String(process.env.HA_TOKEN || "").trim();
@@ -379,6 +381,7 @@ function validateStartupConfig() {
   if (!isPositiveNumber(BG_INTERVAL_MIN)) invalid.push("BG_INTERVAL_MIN");
   if (!isPositiveNumber(BG_NORMAL_INTERVAL_MIN)) invalid.push("BG_NORMAL_INTERVAL_MIN");
   if (!isPositiveNumber(BG_DELAY_MS)) invalid.push("BG_DELAY_MS");
+  if (!(Number.isFinite(DELIVERED_RETENTION_DAYS) && DELIVERED_RETENTION_DAYS >= 0)) invalid.push("DELIVERED_RETENTION_DAYS");
 
   const allowedLogLevels = new Set(Object.keys(LOG_LEVELS));
   if (!allowedLogLevels.has(APP_LOG_LEVEL)) invalid.push("APP_LOG_LEVEL");
@@ -401,6 +404,7 @@ function validateStartupConfig() {
     bg_normal_interval_min: BG_NORMAL_INTERVAL_MIN,
     bg_slow_hours: BG_SLOW_HOURS,
     bg_delay_ms: BG_DELAY_MS,
+    delivered_retention_days: DELIVERED_RETENTION_DAYS,
     ha_configured: !!(HA_URL && HA_TOKEN)
   });
 }
@@ -453,12 +457,10 @@ async function refreshOwnerPolicy(o, ownerKey, now, opts) {
       const norm = normalizeGetTrackInfoResponse(json);
       const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
 
-      o.last = o.last || {};
-      o.last[tn] = one || { number: tn, latest: null, flags: null, error: norm.ok ? null : norm.error };
+      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error, now);
       results.push({ tracking: tn, ok: norm.ok, one });
     } catch (e) {
-      o.last = o.last || {};
-      o.last[tn] = { number: tn, latest: null, flags: null, error: String(e.message || e) };
+      saveTrackingLastSnapshot(o, tn, null, String(e.message || e), now);
       results.push({ tracking: tn, ok: false, error: String(e.message || e) });
     }
 
@@ -526,11 +528,23 @@ async function bgRunOnce() {
       owners_total: ownerKeys.length,
       owners_refreshed: 0,
       owners_skipped: 0,
+      delivered_pruned: 0,
       notifications_sent: 0,
       notified: []
     };
 
     for (const ownerKey of ownerKeys) {
+      const retention = applyDeliveredRetentionForOwner(store, ownerKey, new Date());
+      if (retention.removed > 0) {
+        summary.delivered_pruned += retention.removed;
+        logAt("info", "delivered_retention_pruned", {
+          owner: ownerKey,
+          removed: retention.removed,
+          retention_days: DELIVERED_RETENTION_DAYS
+        });
+        saveStore(store);
+      }
+
       const o = store.owners[ownerKey];
       if (!o || typeof o !== "object") continue;
 
@@ -597,6 +611,7 @@ app.get("/api/bg/status", (_req, res) => {
     normal_interval_min: BG_NORMAL_INTERVAL_MIN,
     slow_hours: BG_SLOW_HOURS,
     delay_ms: BG_DELAY_MS,
+    delivered_retention_days: DELIVERED_RETENTION_DAYS,
     last_run_at: bgState.lastRunAt,
     last_error: bgState.lastError,
     last_summary: bgState.lastSummary,
@@ -750,6 +765,11 @@ function getBodyOrQuery(req, key) {
   return undefined;
 }
 
+function getDeliveredRetentionMs() {
+  if (!Number.isFinite(DELIVERED_RETENTION_DAYS) || DELIVERED_RETENTION_DAYS <= 0) return 0;
+  return DELIVERED_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+}
+
 // Returns effective delivered flag, honoring manual override if present.
 function effectiveIsDelivered(one, trackingMeta) {
   const ov = trackingMeta?.delivered_override;
@@ -786,6 +806,109 @@ function ownerPendingList(o) {
 function parseIsoDate(s) {
   const d = s ? new Date(String(s)) : null;
   return d && !isNaN(d.getTime()) ? d : null;
+}
+
+function deliveredAtForTracking(one, trackingMeta) {
+  const status = String(one?.latest?.status || "").toLowerCase();
+  const fromLatest = status === "delivered" ? parseIsoDate(one?.latest?.time) : null;
+  const fromMeta = parseIsoDate(trackingMeta?.delivered_at);
+  const fromOverride =
+    trackingMeta?.delivered_override === true
+      ? parseIsoDate(trackingMeta?.delivered_override_at)
+      : null;
+  return fromLatest || fromMeta || fromOverride || null;
+}
+
+function updateDeliveredMetaForTracking(o, tn, one, now = new Date()) {
+  if (!one || typeof one !== "object") return;
+  const prev = getTrackingMeta(o, tn);
+  const next = { ...prev };
+  let changed = false;
+
+  const delivered = effectiveIsDelivered(one, next);
+  if (!delivered) {
+    if (next.delivered_at !== undefined) {
+      delete next.delivered_at;
+      changed = true;
+    }
+  } else {
+    const deliveredAt = deliveredAtForTracking(one, next) || now;
+    const iso = deliveredAt.toISOString();
+    if (next.delivered_at !== iso) {
+      next.delivered_at = iso;
+      changed = true;
+    }
+  }
+
+  if (changed) setTrackingMeta(o, tn, next);
+}
+
+function saveTrackingLastSnapshot(o, tn, one, normError = null, now = new Date()) {
+  o.last = o.last && typeof o.last === "object" ? o.last : {};
+  if (one) {
+    o.last[tn] = one;
+    updateDeliveredMetaForTracking(o, tn, one, now);
+  } else {
+    o.last[tn] = { number: tn, latest: null, flags: null, error: normError };
+  }
+}
+
+function applyDeliveredRetentionForOwner(store, owner, now = new Date()) {
+  const retentionMs = getDeliveredRetentionMs();
+  if (!retentionMs) return { removed: 0 };
+
+  const o = getOwner(store, owner);
+  if (!o) return { removed: 0 };
+
+  const tns = ownerTrackings(o);
+  const last = ownerLastMap(o);
+  const announced =
+    o?.announced &&
+    typeof o.announced === "object" &&
+    o.announced.out_for_delivery &&
+    typeof o.announced.out_for_delivery === "object"
+      ? o.announced.out_for_delivery
+      : null;
+  let removed = 0;
+
+  for (const tn of tns) {
+    const one = last?.[tn];
+    const meta = getTrackingMeta(o, tn);
+    if (!effectiveIsDelivered(one, meta)) continue;
+
+    const deliveredAt = deliveredAtForTracking(one, meta);
+    if (!deliveredAt) continue;
+
+    const ageMs = now.getTime() - deliveredAt.getTime();
+    if (ageMs < retentionMs) continue;
+
+    o.trackings = o.trackings.filter((x) => normalizeTracking(x) !== tn);
+    deleteTrackingFromMap(o.meta, tn);
+    deleteTrackingFromMap(o.last, tn);
+    if (announced?.[tn]) delete announced[tn];
+    removed++;
+  }
+
+  if (removed > 0) {
+    if (ownerIsEmpty(o)) delete store.owners[owner];
+    else store.owners[owner] = o;
+  }
+  return { removed };
+}
+
+function applyDeliveredRetentionAndPersist(store, owner, context = {}) {
+  const now = context.now instanceof Date ? context.now : new Date();
+  const r = applyDeliveredRetentionForOwner(store, owner, now);
+  if (r.removed > 0) {
+    saveStore(store);
+    logAt("info", "delivered_retention_pruned", {
+      req_id: context.reqId ?? null,
+      owner,
+      removed: r.removed,
+      retention_days: DELIVERED_RETENTION_DAYS
+    });
+  }
+  return r;
 }
 
 // Decide whether we should refresh now.
@@ -832,6 +955,7 @@ function shouldRefreshOwnerNow(o, now, opts = {}) {
 app.get("/api/owner/:owner/pending", (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId });
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -964,6 +1088,7 @@ function shortOne(one) {
 app.get("/api/owner/:owner/trackings", (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId });
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -998,6 +1123,7 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
   const q = String(req.query?.q || req.query?.query || "");
 
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId });
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -1145,9 +1271,20 @@ app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
 
   if (delivered === true || delivered === false) {
     o.meta[tracking].delivered_override = delivered;
+    if (delivered === true) {
+      const nowIso = new Date().toISOString();
+      o.meta[tracking].delivered_override_at = nowIso;
+      if (!parseIsoDate(o.meta[tracking].delivered_at)) {
+        o.meta[tracking].delivered_at = nowIso;
+      }
+    } else {
+      if (o.meta[tracking].delivered_override_at !== undefined) delete o.meta[tracking].delivered_override_at;
+      if (o.meta[tracking].delivered_at !== undefined) delete o.meta[tracking].delivered_at;
+    }
   } else {
     // clear override
     if (o.meta[tracking].delivered_override !== undefined) delete o.meta[tracking].delivered_override;
+    if (o.meta[tracking].delivered_override_at !== undefined) delete o.meta[tracking].delivered_override_at;
   }
 
   saveStore(store);
@@ -1336,6 +1473,7 @@ app.get("/api/owner/:owner/status", (req, res) => {
   const format = String(req.query?.format || "json").toLowerCase(); // json|text
 
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId });
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -1378,6 +1516,7 @@ app.post("/api/owner/:owner/refresh", async (req, res) => {
   const delayMs = Number(req.body?.delay_ms ?? 5000); // 5s por defecto
 
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId });
   const o = store.owners[owner];
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -1400,13 +1539,11 @@ app.post("/api/owner/:owner/refresh", async (req, res) => {
       results.push({ tracking: tn, ok: norm.ok, one, rejected: norm.rejected, errors: norm.errors });
 
       // guarda last
-      o.last = o.last || {};
-      o.last[tn] = one || { number: tn, latest: null, flags: null, error: norm.ok ? null : norm.error };
+      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error);
 
     } catch (e) {
       results.push({ tracking: tn, ok: false, error: String(e.message || e) });
-      o.last = o.last || {};
-      o.last[tn] = { number: tn, latest: null, flags: null, error: String(e.message || e) };
+      saveTrackingLastSnapshot(o, tn, null, String(e.message || e));
     }
 
     if (i < trackings.length - 1) await sleep(delayMs);
@@ -1428,6 +1565,7 @@ app.post("/api/owner/:owner/refresh_if_needed", async (req, res) => {
   const now = new Date();
 
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId, now });
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -1449,12 +1587,10 @@ app.post("/api/owner/:owner/refresh_if_needed", async (req, res) => {
       const norm = normalizeGetTrackInfoResponse(json);
       const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
 
-      o.last = o.last || {};
-      o.last[tn] = one || { number: tn, latest: null, flags: null, error: norm.ok ? null : norm.error };
+      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error, now);
       results.push({ tracking: tn, ok: norm.ok, one });
     } catch (e) {
-      o.last = o.last || {};
-      o.last[tn] = { number: tn, latest: null, flags: null, error: String(e.message || e) };
+      saveTrackingLastSnapshot(o, tn, null, String(e.message || e), now);
       results.push({ tracking: tn, ok: false, error: String(e.message || e) });
     }
 
@@ -1480,6 +1616,7 @@ app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {
 
   // Reuse the existing refresh logic by calling the internal handler inline:
   const store = loadStore();
+  applyDeliveredRetentionAndPersist(store, owner, { reqId: req.reqId });
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
@@ -1496,13 +1633,11 @@ app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {
       const norm = normalizeGetTrackInfoResponse(json);
       const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
 
-      o.last = o.last || {};
-      o.last[tn] = one || { number: tn, latest: null, flags: null, error: norm.ok ? null : norm.error };
+      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error);
 
       results.push({ tracking: tn, ok: norm.ok, one });
     } catch (e) {
-      o.last = o.last || {};
-      o.last[tn] = { number: tn, latest: null, flags: null, error: String(e.message || e) };
+      saveTrackingLastSnapshot(o, tn, null, String(e.message || e));
       results.push({ tracking: tn, ok: false, error: String(e.message || e) });
     }
 

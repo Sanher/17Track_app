@@ -40,6 +40,7 @@ Background refresher:
 - `BG_NORMAL_INTERVAL_MIN` (default `45`).
 - `BG_SLOW_HOURS` (CSV, default `"8,20"`).
 - `BG_DELAY_MS` (default `5000`).
+- `DELIVERED_RETENTION_DAYS` (default `7`, `0` desactiva borrado automático de entregados).
 
 Integración con Home Assistant (notificaciones):
 
@@ -84,6 +85,7 @@ El estado se guarda en `DATA_DIR/store.json`.
 - Si `GET /api/bg/status` devuelve `enabled=false`, no hay refresco automático.
 - Activa `BG_ENABLED` en la config del add-on y reinicia.
 - Puedes arrancarlo manualmente para diagnóstico con `POST /api/bg/start`.
+- Si un owner no tiene trackings, el refresco se omite (`reason: no_trackings`).
 
 ## Estado del proyecto
 

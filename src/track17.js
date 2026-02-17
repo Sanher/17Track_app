@@ -189,18 +189,26 @@ function normalizeAccepted(a0) {
 
   // Heurística “en reparto”
   const d = latestDesc.toLowerCase();
+  const sub = latestSub.toLowerCase();
+  const status = latestStatus.toLowerCase();
   const isOutForDelivery =
-    latestStatus === "OutForDelivery" ||
-    latestSub.toLowerCase().includes("outfordelivery") ||
+    status === "outfordelivery" ||
+    sub.includes("outfordelivery") ||
     d.includes("en reparto") ||
     d.includes("out for delivery");
 
   // Entregado
+  // Nota: "being delivered" (en reparto) NO debe contar como entregado.
+  const deliveredByDesc =
+    (d.includes("entregado") || d.includes("delivered")) &&
+    !d.includes("out for delivery") &&
+    !d.includes("being delivered") &&
+    !d.includes("en reparto");
+
   const isDelivered =
-    latestStatus === "Delivered" ||
-    latestSub.toLowerCase().includes("delivered") ||
-    d.includes("entregado") ||
-    d.includes("delivered");
+    status === "delivered" ||
+    sub.startsWith("delivered") ||
+    deliveredByDesc;
 
   return {
     number,

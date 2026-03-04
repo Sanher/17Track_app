@@ -7,6 +7,15 @@ const STORE_FILE = "store.json";
 const APP_LOG_LEVEL = String(process.env.APP_LOG_LEVEL || "info").trim().toLowerCase();
 const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const APP_VERSION = `v${String(require("../package.json")?.version || "0.0.0")}`;
+const PACKAGE_SOURCES = new Set(["track17", "imap"]);
+const DEFAULT_PACKAGE_SOURCE = "track17";
+const APP_JSON_LIMIT = String(process.env.APP_JSON_LIMIT || "256kb").trim();
+const APP_API_KEY = String(process.env.APP_API_KEY || "").trim();
+const HA_AUDIT_LOG_ENABLED_RAW = process.env.HA_AUDIT_LOG_ENABLED;
+const HA_AUDIT_LOG_ENABLED = boolFromAny(HA_AUDIT_LOG_ENABLED_RAW, false);
+const HA_AUDIT_LOG_LEVEL = String(process.env.HA_AUDIT_LOG_LEVEL || "warn").trim().toLowerCase();
+const HA_AUDIT_LOG_NAME = String(process.env.HA_AUDIT_LOG_NAME || "Paquetes App").trim();
+const HA_AUDIT_LOG_ENTITY_ID = String(process.env.HA_AUDIT_LOG_ENTITY_ID || "").trim();
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -32,7 +41,7 @@ function localIsoWithOffset(d = new Date()) {
  *
  * {
  *   owners: {
- *     david: {
+ *     owner_a: {
  *       trackings: ["PH7...", "323..."] ,
  *       // meta holds user-provided metadata per tracking number
  *       meta: {
@@ -66,7 +75,63 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: APP_JSON_LIMIT }));
+
+function extractRequestApiKey(req) {
+  const byHeader = String(req.get("x-api-key") || "").trim();
+  if (byHeader) return byHeader;
+  const auth = String(req.get("authorization") || "").trim();
+  if (/^Bearer\s+/i.test(auth)) {
+    return auth.replace(/^Bearer\s+/i, "").trim();
+  }
+  return "";
+}
+
+function sanitizeAuditExtra(extra = {}) {
+  const out = {};
+  const hidden = ["token", "secret", "password", "authorization", "api_key", "bearer"];
+  for (const [k, v] of Object.entries(extra || {})) {
+    const lk = String(k || "").toLowerCase();
+    if (hidden.some((h) => lk.includes(h))) {
+      out[k] = "[redacted]";
+      continue;
+    }
+    if (typeof v === "string") {
+      out[k] = v.length > 180 ? `${v.slice(0, 180)}...` : v;
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+async function postHaAuditLog(level, message, extra = {}) {
+  if (!HA_AUDIT_LOG_ENABLED) return;
+  const eventLevel = LOG_LEVELS[level] ?? LOG_LEVELS.info;
+  const minLevel = LOG_LEVELS[HA_AUDIT_LOG_LEVEL] ?? LOG_LEVELS.warn;
+  if (eventLevel < minLevel) return;
+
+  const sanitized = sanitizeAuditExtra(extra);
+  const details = Object.keys(sanitized).length ? ` | ${JSON.stringify(sanitized)}` : "";
+  const logbookPayload = {
+    name: HA_AUDIT_LOG_NAME || "Paquetes App",
+    message: `[${level}] ${message}${details}`.slice(0, 1024)
+  };
+  if (HA_AUDIT_LOG_ENTITY_ID) logbookPayload.entity_id = HA_AUDIT_LOG_ENTITY_ID;
+
+  try {
+    await callHAService("logbook", "log", logbookPayload);
+  } catch (e) {
+    logAt("warn", "ha_audit_log_failed", {
+      error: String(e.message || e),
+      audit_message: message
+    });
+  }
+}
+
+function postHaAuditLogSafe(level, message, extra = {}) {
+  postHaAuditLog(level, message, extra).catch(() => { });
+}
 
 function logAt(level, message, extra = {}) {
   const target = LOG_LEVELS[level] ?? LOG_LEVELS.info;
@@ -109,6 +174,25 @@ app.use((req, res, next) => {
     });
   });
   next();
+});
+
+// Optional API protection: when APP_API_KEY is set, every endpoint except health/build requires it.
+app.use((req, res, next) => {
+  if (!APP_API_KEY) return next();
+  if (req.path === "/health" || req.path === "/api/_build") return next();
+
+  const provided = extractRequestApiKey(req);
+  if (provided && provided === APP_API_KEY) return next();
+
+  const payload = {
+    req_id: req.reqId,
+    method: req.method,
+    path: req.originalUrl,
+    ip: req.ip
+  };
+  logAt("warn", "api_auth_failed", payload);
+  postHaAuditLogSafe("warn", "api_auth_failed", payload);
+  return res.status(401).json({ ok: false, error: "unauthorized" });
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -161,6 +245,102 @@ function parseCsvLine(line) {
   }
   out.push(cur);
   return out;
+}
+
+function normalizePackageSource(sourceRaw, fallback = DEFAULT_PACKAGE_SOURCE) {
+  const s = String(sourceRaw || "").trim().toLowerCase();
+  if (!s) return fallback;
+  return PACKAGE_SOURCES.has(s) ? s : null;
+}
+
+function maybeBool(v) {
+  if (v === true || v === false) return v;
+  const s = String(v ?? "").trim().toLowerCase();
+  if (!s) return undefined;
+  if (["1", "true", "yes", "y", "on"].includes(s)) return true;
+  if (["0", "false", "no", "n", "off"].includes(s)) return false;
+  return undefined;
+}
+
+function parseIsoOrNull(v) {
+  const raw = String(v || "").trim();
+  if (!raw) return null;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function detectImapOutForDelivery(status, subStatus, description) {
+  const s = String(status || "").toLowerCase();
+  const sub = String(subStatus || "").toLowerCase();
+  const d = String(description || "").toLowerCase();
+  return (
+    s.includes("outfordelivery") ||
+    s.includes("out_for_delivery") ||
+    s.includes("en reparto") ||
+    sub.includes("outfordelivery") ||
+    sub.includes("out_for_delivery") ||
+    sub.includes("en reparto") ||
+    d.includes("out for delivery") ||
+    d.includes("en reparto")
+  );
+}
+
+function detectImapDelivered(status, subStatus, description) {
+  const s = String(status || "").toLowerCase();
+  const sub = String(subStatus || "").toLowerCase();
+  const d = String(description || "").toLowerCase();
+  const looksDelivered = (
+    s.includes("delivered") ||
+    s.includes("entregado") ||
+    sub.includes("delivered") ||
+    sub.includes("entregado") ||
+    d.includes("delivered") ||
+    d.includes("entregado")
+  );
+  const looksOfd = detectImapOutForDelivery(status, subStatus, description) || d.includes("being delivered");
+  return looksDelivered && !looksOfd;
+}
+
+function normalizeImapSnapshot(item, tracking, accountEmail = "") {
+  const status = String(item?.status || "").trim();
+  const subStatus = String(item?.sub_status || item?.subStatus || "").trim();
+  const description = String(item?.description || item?.desc || "").trim();
+  const location = String(item?.location || "").trim();
+  const carrierName = String(item?.carrier_name || item?.carrierName || "").trim();
+  const timeIso = parseIsoOrNull(item?.time_iso || item?.time || item?.event_time);
+  const forcedOutForDelivery = maybeBool(item?.is_out_for_delivery ?? item?.isOutForDelivery);
+  const forcedDelivered = maybeBool(item?.is_delivered ?? item?.isDelivered);
+  const isOutForDelivery = forcedOutForDelivery ?? detectImapOutForDelivery(status, subStatus, description);
+  const isDelivered = forcedDelivered ?? detectImapDelivered(status, subStatus, description);
+
+  return {
+    number: tracking,
+    carrierKey: null,
+    carrierName: carrierName || null,
+    carrierCountry: null,
+    source: "imap",
+    sourceAccount: accountEmail || null,
+    latest: {
+      status: status || null,
+      subStatus: subStatus || null,
+      description: description || null,
+      time: timeIso,
+      location: location || null
+    },
+    flags: {
+      isOutForDelivery: !!isOutForDelivery,
+      isDelivered: !!isDelivered
+    }
+  };
+}
+
+function inferImapProvider(email) {
+  const e = String(email || "").trim().toLowerCase();
+  if (!e.includes("@")) return "generic";
+  const domain = e.split("@")[1] || "";
+  if (domain.includes("gmail.com") || domain.includes("googlemail.com")) return "gmail";
+  if (domain.includes("outlook.") || domain.includes("hotmail.") || domain.includes("live.") || domain.includes("microsoft")) return "outlook";
+  return "generic";
 }
 
 function parseTrack17CarriersCsv(csvRaw) {
@@ -371,7 +551,6 @@ function isPositiveNumber(n) {
 
 function validateStartupConfig() {
   const missing = [];
-  if (!TRACK17_TOKEN) missing.push("TRACK17_TOKEN");
   if (!HA_URL) missing.push("HA_URL");
   if (!HA_TOKEN) missing.push("HA_TOKEN");
   if (!HA_SCRIPT) missing.push("HA_SCRIPT");
@@ -385,6 +564,7 @@ function validateStartupConfig() {
 
   const allowedLogLevels = new Set(Object.keys(LOG_LEVELS));
   if (!allowedLogLevels.has(APP_LOG_LEVEL)) invalid.push("APP_LOG_LEVEL");
+  if (!allowedLogLevels.has(HA_AUDIT_LOG_LEVEL)) invalid.push("HA_AUDIT_LOG_LEVEL");
 
   if (missing.length || invalid.length) {
     const details = {
@@ -396,6 +576,18 @@ function validateStartupConfig() {
     process.exit(1);
   }
 
+  if (!TRACK17_TOKEN) {
+    logAt("warn", "track17_token_missing_track17_source_disabled", {
+      hint: "Puedes seguir usando source=imap y /api/owner/:owner/imap/ingest."
+    });
+  }
+
+  if (APP_API_KEY) {
+    logAt("warn", "api_key_auth_enabled", {
+      hint: "Incluye X-API-Key o Authorization: Bearer <key> en los clientes."
+    });
+  }
+
   logAt("info", "startup_config_ok", {
     app_version: APP_VERSION,
     bg_enabled: BG_ENABLED,
@@ -405,7 +597,11 @@ function validateStartupConfig() {
     bg_slow_hours: BG_SLOW_HOURS,
     bg_delay_ms: BG_DELAY_MS,
     delivered_retention_days: DELIVERED_RETENTION_DAYS,
-    ha_configured: !!(HA_URL && HA_TOKEN)
+    ha_configured: !!(HA_URL && HA_TOKEN),
+    json_limit: APP_JSON_LIMIT,
+    api_key_enabled: !!APP_API_KEY,
+    ha_audit_log_enabled: HA_AUDIT_LOG_ENABLED,
+    ha_audit_log_level: HA_AUDIT_LOG_LEVEL
   });
 }
 function ownersFromStore(store) {
@@ -435,6 +631,54 @@ function buildOwnerDeliveryMessage(ownerKey, newOnes) {
   return `📦 Paquete(s) en reparto (${ownerKey}):\n${lines.join("\n")}`;
 }
 
+async function refreshTrackingBySource(o, ownerKey, tn, now = new Date()) {
+  const source = trackingSource(o, tn);
+
+  if (source === "track17") {
+    try {
+      const carrier = trackingPreferredCarrier(o, tn);
+      const { json } = await getTrackInfo(tn, carrier);
+      const norm = normalizeGetTrackInfoResponse(json);
+      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
+      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error, now);
+      return {
+        tracking: tn,
+        source,
+        ok: norm.ok,
+        one,
+        rejected: norm.rejected,
+        errors: norm.errors
+      };
+    } catch (e) {
+      const err = String(e.message || e);
+      saveTrackingLastSnapshot(o, tn, null, err, now);
+      return { tracking: tn, source, ok: false, error: err };
+    }
+  }
+
+  if (source === "imap") {
+    const last = ownerLastMap(o);
+    const one = last?.[tn];
+    if (one) {
+      saveTrackingLastSnapshot(o, tn, one, null, now);
+      return { tracking: tn, source, ok: true, one, mode: "push" };
+    }
+    const err = "imap_pending_ingest";
+    saveTrackingLastSnapshot(o, tn, null, err, now);
+    const payload = { owner: ownerKey, tracking: tn, source, error: err };
+    logAt("warn", "tracking_refresh_imap_pending_ingest", payload);
+    postHaAuditLogSafe("warn", "tracking_refresh_imap_pending_ingest", payload);
+    return { tracking: tn, source, ok: false, error: err, mode: "push" };
+  }
+
+  const err = `source_not_supported:${source}`;
+  saveTrackingLastSnapshot(o, tn, null, err, now);
+  const payload = { owner: ownerKey, tracking: tn, source, error: err };
+  logAt("warn", "tracking_source_not_supported", payload);
+  postHaAuditLogSafe("warn", "tracking_source_not_supported", payload);
+  return { tracking: tn, source, ok: false, error: err };
+}
+
 async function refreshOwnerPolicy(o, ownerKey, now, opts) {
   const decision = shouldRefreshOwnerNow(o, now, {
     normalIntervalMin: opts.normalIntervalMin,
@@ -450,19 +694,8 @@ async function refreshOwnerPolicy(o, ownerKey, now, opts) {
 
   for (let i = 0; i < trackings.length; i++) {
     const tn = trackings[i];
-
-    try {
-      const carrier = trackingPreferredCarrier(o, tn);
-      const { json } = await getTrackInfo(tn, carrier);
-      const norm = normalizeGetTrackInfoResponse(json);
-      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
-
-      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error, now);
-      results.push({ tracking: tn, ok: norm.ok, one });
-    } catch (e) {
-      saveTrackingLastSnapshot(o, tn, null, String(e.message || e), now);
-      results.push({ tracking: tn, ok: false, error: String(e.message || e) });
-    }
+    const r = await refreshTrackingBySource(o, ownerKey, tn, now);
+    results.push(r);
 
     if (i < trackings.length - 1) await sleep(opts.delayMs);
   }
@@ -592,10 +825,12 @@ async function bgRunOnce() {
     }
 
     bgState.lastSummary = summary;
+    postHaAuditLogSafe("info", "bg_run_summary", summary);
 
     return { ok: true, ran: true, summary };
   } catch (e) {
     bgState.lastError = String(e.message || e);
+    postHaAuditLogSafe("error", "bg_run_failed", { error: bgState.lastError });
     return { ok: false, error: bgState.lastError };
   } finally {
     bgState.running = false;
@@ -668,7 +903,59 @@ function ensureOwnerShape(store, owner) {
   o.trackings = [...new Set(normalizedTrackings)];
   o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
   o.last = o.last && typeof o.last === "object" ? o.last : {};
+  o.imap_accounts = Array.isArray(o.imap_accounts) ? o.imap_accounts : [];
   return o;
+}
+
+function normalizeImapAccountEntry(a) {
+  const email = String(a?.email || "").trim().toLowerCase();
+  if (!email || !email.includes("@")) return null;
+  const providerRaw = String(a?.provider || "").trim().toLowerCase();
+  const provider = providerRaw || inferImapProvider(email);
+  const enabled = maybeBool(a?.enabled);
+  return {
+    email,
+    provider,
+    enabled: enabled === undefined ? true : enabled
+  };
+}
+
+function ownerImapAccounts(o) {
+  const raw = Array.isArray(o?.imap_accounts) ? o.imap_accounts : [];
+  const out = [];
+  const seen = new Set();
+  for (const a of raw) {
+    const normalized = normalizeImapAccountEntry(a);
+    if (!normalized) continue;
+    if (seen.has(normalized.email)) continue;
+    seen.add(normalized.email);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function setOwnerImapAccounts(o, accounts) {
+  o.imap_accounts = ownerImapAccounts({ imap_accounts: accounts });
+}
+
+function upsertOwnerImapAccount(o, accountLike) {
+  const next = normalizeImapAccountEntry(accountLike);
+  if (!next) return null;
+  const accounts = ownerImapAccounts(o);
+  const idx = accounts.findIndex((a) => a.email === next.email);
+  if (idx >= 0) accounts[idx] = { ...accounts[idx], ...next };
+  else accounts.push(next);
+  setOwnerImapAccounts(o, accounts);
+  return next;
+}
+
+function removeOwnerImapAccount(o, emailRaw) {
+  const email = String(emailRaw || "").trim().toLowerCase();
+  const accounts = ownerImapAccounts(o);
+  const next = accounts.filter((a) => a.email !== email);
+  const removed = accounts.length - next.length;
+  setOwnerImapAccounts(o, next);
+  return removed;
 }
 
 function getMeta(o) {
@@ -748,6 +1035,11 @@ function metaCarrierKey(meta) {
 function trackingPreferredCarrier(o, tn) {
   const meta = getTrackingMeta(o, tn);
   return metaCarrierKey(meta);
+}
+
+function trackingSource(o, tn) {
+  const meta = getTrackingMeta(o, tn);
+  return normalizePackageSource(meta?.source, DEFAULT_PACKAGE_SOURCE) || DEFAULT_PACKAGE_SOURCE;
 }
 
 function boolFromAny(v, def = false) {
@@ -1104,6 +1396,8 @@ app.get("/api/owner/:owner/trackings", (req, res) => {
 
     return {
       tracking: tn,
+      source: trackingSource(o, tn),
+      imap_account: String(meta?.imap_account || "").trim() || null,
       note: String(meta?.note || "").trim() || "",
       carrier_override: metaCarrierKey(meta) ?? null,
       delivered_override,
@@ -1117,7 +1411,7 @@ app.get("/api/owner/:owner/trackings", (req, res) => {
 });
 
 // Resolve a query to a tracking number by either tracking itself or note/alias.
-// Example: /api/owner/david/resolve?q=ropa
+// Example: /api/owner/owner_a/resolve?q=ropa
 app.get("/api/owner/:owner/resolve", (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const q = String(req.query?.q || req.query?.query || "");
@@ -1144,9 +1438,16 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
     owner,
     query: q,
     tracking: hit.tracking,
+    source: trackingSource(o, hit.tracking),
+    imap_account: String(meta?.imap_account || "").trim() || null,
     note: hit.note || "",
     score: hit.score,
-    matches: matches.map((m) => ({ tracking: m.tracking, note: m.note || "", score: m.score })),
+    matches: matches.map((m) => ({
+      tracking: m.tracking,
+      source: trackingSource(o, m.tracking),
+      note: m.note || "",
+      score: m.score
+    })),
     carrier_override: metaCarrierKey(meta) ?? null,
     delivered_override,
     delivered_effective: effectiveIsDelivered(last?.[hit.tracking], meta),
@@ -1156,21 +1457,222 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
 });
 
 app.get("/api/store", (_req, res) => {
-  res.json(loadStore());
+  const store = loadStore();
+  const owners = store?.owners && typeof store.owners === "object" ? Object.keys(store.owners) : [];
+  const payload = { req_id: _req.reqId, owners_count: owners.length };
+  logAt("warn", "store_dump_requested", payload);
+  postHaAuditLogSafe("warn", "store_dump_requested", payload);
+  res.json(store);
+});
+
+app.get("/api/owner/:owner/imap/accounts", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ error: "owner no existe" });
+  const accounts = ownerImapAccounts(o);
+  return res.json({ ok: true, owner, count: accounts.length, accounts });
+});
+
+app.post("/api/owner/:owner/imap/accounts", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const email = String(req.body?.email || req.body?.account_email || "").trim().toLowerCase();
+  const provider = String(req.body?.provider || "").trim().toLowerCase();
+  const enabled = maybeBool(req.body?.enabled);
+  if (!email || !email.includes("@")) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      account_email: email || null,
+      error: "email_invalido"
+    };
+    logAt("warn", "imap_account_upsert_invalid_email", payload);
+    postHaAuditLogSafe("warn", "imap_account_upsert_invalid_email", payload);
+    return res.status(400).json({ ok: false, owner, error: "email_invalido" });
+  }
+
+  const store = loadStore();
+  const o = ensureOwnerShape(store, owner);
+  const account = upsertOwnerImapAccount(o, {
+    email,
+    provider: provider || inferImapProvider(email),
+    enabled: enabled === undefined ? true : enabled
+  });
+  saveStore(store);
+  logAt("info", "imap_account_upserted", {
+    req_id: req.reqId,
+    owner,
+    account_email: email,
+    provider: account?.provider || null
+  });
+  postHaAuditLogSafe("info", "imap_account_upserted", {
+    owner,
+    account_email: email,
+    provider: account?.provider || null
+  });
+  return res.json({
+    ok: true,
+    owner,
+    account,
+    count: ownerImapAccounts(o).length
+  });
+});
+
+app.delete("/api/owner/:owner/imap/accounts/:email", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const email = decodeURIComponent(String(req.params.email || "")).trim().toLowerCase();
+  if (!email) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      account_email: null,
+      error: "email_invalido"
+    };
+    logAt("warn", "imap_account_delete_invalid_email", payload);
+    postHaAuditLogSafe("warn", "imap_account_delete_invalid_email", payload);
+    return res.status(400).json({ ok: false, owner, error: "email_invalido" });
+  }
+
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ error: "owner no existe" });
+  const removed = removeOwnerImapAccount(o, email);
+  saveStore(store);
+  logAt("info", "imap_account_deleted", {
+    req_id: req.reqId,
+    owner,
+    account_email: email,
+    removed_count: removed
+  });
+  postHaAuditLogSafe("info", "imap_account_deleted", {
+    owner,
+    account_email: email,
+    removed_count: removed
+  });
+  return res.json({
+    ok: true,
+    owner,
+    email,
+    removed: removed > 0,
+    removed_count: removed,
+    count: ownerImapAccounts(o).length
+  });
+});
+
+app.post("/api/owner/:owner/imap/ingest", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const fallbackAccountEmail = String(req.body?.account_email || req.body?.account || "").trim().toLowerCase();
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) {
+    const payload = { req_id: req.reqId, owner, error: "items_obligatorio" };
+    logAt("warn", "imap_ingest_rejected_empty_items", payload);
+    postHaAuditLogSafe("warn", "imap_ingest_rejected_empty_items", payload);
+    return res.status(400).json({ ok: false, owner, error: "items_obligatorio" });
+  }
+
+  const store = loadStore();
+  const o = ensureOwnerShape(store, owner);
+  const now = new Date();
+  const accepted = [];
+  let skipped_invalid = 0;
+
+  for (const item of items) {
+    const tracking = normalizeTracking(item?.tracking || item?.number || item?.id || "");
+    if (!tracking) {
+      skipped_invalid++;
+      continue;
+    }
+    if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
+
+    const accountEmail = String(item?.account_email || item?.account || fallbackAccountEmail || "")
+      .trim()
+      .toLowerCase();
+    if (accountEmail && accountEmail.includes("@")) {
+      upsertOwnerImapAccount(o, { email: accountEmail, provider: inferImapProvider(accountEmail), enabled: true });
+    }
+
+    const prev = getTrackingMeta(o, tracking);
+    const nextMeta = {
+      ...prev,
+      source: "imap",
+      ...(accountEmail ? { imap_account: accountEmail } : {})
+    };
+    const note = String(item?.note || "").trim();
+    if (note) nextMeta.note = note;
+    setTrackingMeta(o, tracking, nextMeta);
+
+    const one = normalizeImapSnapshot(item, tracking, accountEmail);
+    saveTrackingLastSnapshot(o, tracking, one, null, now);
+    accepted.push({ tracking, source: "imap", imap_account: accountEmail || null });
+  }
+
+  o.last_imap_ingest_at = now.toISOString();
+  saveStore(store);
+  if (skipped_invalid > 0) {
+    // Keep this as warning to surface malformed payloads in HA logbook.
+    logAt("warn", "imap_ingest_items_skipped_invalid", {
+      req_id: req.reqId,
+      owner,
+      ingested: accepted.length,
+      skipped_invalid
+    });
+    postHaAuditLogSafe("warn", "imap_ingest_items_skipped_invalid", {
+      owner,
+      ingested: accepted.length,
+      skipped_invalid
+    });
+  }
+
+  const ingestLevel = accepted.length === 0 && skipped_invalid > 0 ? "warn" : "info";
+  logAt(ingestLevel, "imap_ingest_done", {
+    req_id: req.reqId,
+    owner,
+    ingested: accepted.length,
+    skipped_invalid
+  });
+  postHaAuditLogSafe(ingestLevel, "imap_ingest_done", {
+    owner,
+    ingested: accepted.length,
+    skipped_invalid
+  });
+
+  return res.json({
+    ok: true,
+    owner,
+    ingested: accepted.length,
+    skipped_invalid,
+    accepted
+  });
 });
 
 app.post("/api/owner/:owner/tracking", async (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const tracking = normalizeTracking(req.body?.tracking || req.query?.tracking || "");
   const note = String(req.body?.note || "").trim();
+  const source = normalizePackageSource(getBodyOrQuery(req, "source"), DEFAULT_PACKAGE_SOURCE);
+  const imapAccount = String(getBodyOrQuery(req, "imap_account") || "").trim().toLowerCase();
   const carrierAlias = String(req.body?.carrier_alias || req.query?.carrier_alias || "").trim();
   const carrier = resolveCarrierKey(req.body?.carrier || req.query?.carrier || carrierAlias);
-  const registerOnAdd = boolFromAny(getBodyOrQuery(req, "register_on_add"), true);
+  const registerOnAdd = boolFromAny(getBodyOrQuery(req, "register_on_add"), source === "track17");
   const registerStrict = boolFromAny(getBodyOrQuery(req, "register_strict"), false);
+  if (source === null) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      tracking,
+      source_raw: getBodyOrQuery(req, "source")
+    };
+    logAt("warn", "tracking_add_invalid_source", payload);
+    postHaAuditLogSafe("warn", "tracking_add_invalid_source", payload);
+    return res.status(400).json({ error: "source_invalido", allowed_sources: [...PACKAGE_SOURCES] });
+  }
+
   logAt("info", "tracking_add_requested", {
     req_id: req.reqId,
     owner,
     tracking,
+    source,
+    imap_account: imapAccount || null,
     carrier: carrier ?? null,
     register_on_add: registerOnAdd,
     register_strict: registerStrict
@@ -1182,20 +1684,27 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
   const o = ensureOwnerShape(store, owner);
 
   if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
-  if (note) {
-    const prev = getTrackingMeta(o, tracking);
-    setTrackingMeta(o, tracking, {
-      ...prev,
-      note,
-      ...(Number.isFinite(carrier) ? { carrier_key: carrier } : {})
-    });
-  } else if (Number.isFinite(carrier)) {
-    const prev = getTrackingMeta(o, tracking);
-    setTrackingMeta(o, tracking, { ...prev, carrier_key: carrier });
+  const prevMeta = getTrackingMeta(o, tracking);
+  const nextMeta = { ...prevMeta, source };
+  if (note) nextMeta.note = note;
+  if (source === "track17") {
+    if (nextMeta.imap_account !== undefined) delete nextMeta.imap_account;
+    if (Number.isFinite(carrier)) nextMeta.carrier_key = carrier;
+  } else if (source === "imap") {
+    if (nextMeta.carrier_key !== undefined) delete nextMeta.carrier_key;
+    if (imapAccount && imapAccount.includes("@")) {
+      nextMeta.imap_account = imapAccount;
+      upsertOwnerImapAccount(o, {
+        email: imapAccount,
+        provider: inferImapProvider(imapAccount),
+        enabled: true
+      });
+    }
   }
+  setTrackingMeta(o, tracking, nextMeta);
 
   let registerResult = null;
-  if (registerOnAdd) {
+  if (registerOnAdd && source === "track17") {
     try {
       const r = await register(tracking, carrier);
       const apiCode = Number(r?.json?.code);
@@ -1242,6 +1751,24 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
         });
       }
     }
+  } else if (registerOnAdd && source !== "track17") {
+    registerResult = {
+      ok: false,
+      skipped: true,
+      source,
+      reason: "source_not_registerable"
+    };
+    logAt("warn", "tracking_register_skipped_source_not_registerable", {
+      req_id: req.reqId,
+      owner,
+      tracking,
+      source
+    });
+    postHaAuditLogSafe("warn", "tracking_register_skipped_source_not_registerable", {
+      owner,
+      tracking,
+      source
+    });
   }
 
   saveStore(store);
@@ -1249,9 +1776,10 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
     req_id: req.reqId,
     owner,
     tracking,
+    source,
     register_ok: registerResult?.ok ?? null
   });
-  res.json({ ok: true, owner, tracking, note, register: registerResult });
+  res.json({ ok: true, owner, tracking, source, note, register: registerResult });
 });
 
 // Set or clear a manual delivered override for a tracking number.
@@ -1328,6 +1856,19 @@ app.post("/api/owner/:owner/tracking/:tracking/carrier", async (req, res) => {
   const store = loadStore();
   const o = ensureOwnerShape(store, owner);
   if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
+  const source = trackingSource(o, tracking);
+  if (source !== "track17") {
+    const payload = { req_id: req.reqId, owner, tracking, source };
+    logAt("warn", "tracking_carrier_update_blocked_non_track17", payload);
+    postHaAuditLogSafe("warn", "tracking_carrier_update_blocked_non_track17", payload);
+    return res.status(400).json({
+      ok: false,
+      owner,
+      tracking,
+      source,
+      error: "carrier_only_track17"
+    });
+  }
 
   const prev = getTrackingMeta(o, tracking);
   const next = { ...prev };
@@ -1338,24 +1879,17 @@ app.post("/api/owner/:owner/tracking/:tracking/carrier", async (req, res) => {
   let refreshed = false;
   let refresh_error = null;
   let refresh_one = null;
-  try {
-    const preferred = trackingPreferredCarrier(o, tracking);
-    const { json } = await getTrackInfo(tracking, preferred);
-    const norm = normalizeGetTrackInfoResponse(json);
-    const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
-    o.last = o.last || {};
-    o.last[tracking] = one || { number: tracking, latest: null, flags: null, error: norm.ok ? null : norm.error };
-    refresh_one = one ? shortOne(one) : null;
-    refreshed = true;
-  } catch (e) {
-    refresh_error = String(e.message || e);
-  }
+  const rr = await refreshTrackingBySource(o, owner, tracking, new Date());
+  refreshed = !!rr?.ok;
+  refresh_error = rr?.ok ? null : String(rr?.error || "refresh_failed");
+  refresh_one = rr?.one ? shortOne(rr.one) : null;
 
   saveStore(store);
   logAt("info", "tracking_carrier_updated", {
     req_id: req.reqId,
     owner,
     tracking,
+    source,
     carrier_override: clearRequested ? null : resolvedCarrier,
     refreshed,
     refresh_error
@@ -1365,6 +1899,7 @@ app.post("/api/owner/:owner/tracking/:tracking/carrier", async (req, res) => {
     ok: true,
     owner,
     tracking,
+    source,
     carrier_override: clearRequested ? null : resolvedCarrier,
     refreshed,
     refresh_error,
@@ -1503,6 +2038,7 @@ app.get("/api/owner/:owner/status", (req, res) => {
     count: items.length,
     items: items.map((x) => ({
       tracking: x.tn,
+      source: trackingSource(o, x.tn),
       one: x.one,
       note: x.note,
       delivered_override: (x.meta?.delivered_override === true || x.meta?.delivered_override === false) ? x.meta.delivered_override : null
@@ -1527,24 +2063,8 @@ app.post("/api/owner/:owner/refresh", async (req, res) => {
   for (let i = 0; i < trackings.length; i++) {
     const tn = String(trackings[i] || "").trim().toUpperCase();
     if (!tn) continue;
-
-    try {
-      const carrier = trackingPreferredCarrier(o, tn);
-      const { json } = await getTrackInfo(tn, carrier);
-      const norm = normalizeGetTrackInfoResponse(json);
-
-      // norm.accepted[0] contiene el estado normalizado
-      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
-
-      results.push({ tracking: tn, ok: norm.ok, one, rejected: norm.rejected, errors: norm.errors });
-
-      // guarda last
-      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error);
-
-    } catch (e) {
-      results.push({ tracking: tn, ok: false, error: String(e.message || e) });
-      saveTrackingLastSnapshot(o, tn, null, String(e.message || e));
-    }
+    const r = await refreshTrackingBySource(o, owner, tn, new Date());
+    results.push(r);
 
     if (i < trackings.length - 1) await sleep(delayMs);
   }
@@ -1581,18 +2101,8 @@ app.post("/api/owner/:owner/refresh_if_needed", async (req, res) => {
   const results = [];
   for (let i = 0; i < trackings.length; i++) {
     const tn = trackings[i];
-    try {
-      const carrier = trackingPreferredCarrier(o, tn);
-      const { json } = await getTrackInfo(tn, carrier);
-      const norm = normalizeGetTrackInfoResponse(json);
-      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
-
-      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error, now);
-      results.push({ tracking: tn, ok: norm.ok, one });
-    } catch (e) {
-      saveTrackingLastSnapshot(o, tn, null, String(e.message || e), now);
-      results.push({ tracking: tn, ok: false, error: String(e.message || e) });
-    }
+    const r = await refreshTrackingBySource(o, owner, tn, now);
+    results.push(r);
 
     if (i < trackings.length - 1) await sleep(delayMs);
   }
@@ -1626,20 +2136,8 @@ app.post("/api/owner/:owner/refresh_and_filter", async (req, res) => {
   for (let i = 0; i < trackings.length; i++) {
     const tn = String(trackings[i] || "").trim().toUpperCase();
     if (!tn) continue;
-
-    try {
-      const carrier = trackingPreferredCarrier(o, tn);
-      const { json } = await getTrackInfo(tn, carrier);
-      const norm = normalizeGetTrackInfoResponse(json);
-      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
-
-      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error);
-
-      results.push({ tracking: tn, ok: norm.ok, one });
-    } catch (e) {
-      saveTrackingLastSnapshot(o, tn, null, String(e.message || e));
-      results.push({ tracking: tn, ok: false, error: String(e.message || e) });
-    }
+    const r = await refreshTrackingBySource(o, owner, tn, new Date());
+    results.push(r);
 
     if (i < trackings.length - 1) await sleep(delayMs);
   }

@@ -4,3 +4,5 @@ data/*
 .env
 .DS_Store
 .codex_seen/
+__pycache__/
+*.pyc

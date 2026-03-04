@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node -r dotenv/config src/index.js",
     "imap:worker": "python3 scripts/imap_ingest_worker.py",
-    "test:imap": "python3 -m unittest -v tests/test_imap_ingest_worker.py"
+    "test:imap": "python3 -m unittest -v tests/test_imap_ingest_worker.py",
+    "store:purge-track17": "node scripts/purge_track17_store.js"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

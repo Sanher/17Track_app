@@ -1,29 +1,28 @@
 # 17Track App
 
-Servidor Node.js para gestionar trackings de 17Track por owner (por ejemplo `owner_a` y `owner_b`) y exponer una API REST pensada para integrarse con Home Assistant.
+Servidor Node.js para gestionar paquetes por owner (por ejemplo `owner_a` y `owner_b`) y exponer una API REST pensada para integrarse con Home Assistant.
 
 ## Características
 
 - Alta/baja/listado de trackings por owner.
-- Soporte de múltiples fuentes por tracking (`track17` e `imap`).
+- Soporte IMAP-only (`source=imap`).
 - Consulta de estado normalizado por tracking.
 - Resolución por alias/nota (`/resolve`).
 - Override manual de `delivered` por tracking.
 - Refresco manual y refresco condicional en background.
-- Logs estructurados para requests y llamadas a 17Track.
-- Worker IMAP opcional para ingesta de eventos desde buzones (Gmail/Outlook).
+- Logs estructurados para requests y auditoría.
+- Worker IMAP para ingesta de eventos desde buzones (Gmail/Outlook).
 
 ## Requisitos
 
 - Node.js 20+ (recomendado).
 - Python 3.10+ (para ejecutar el worker IMAP).
-- Token de API de 17Track (`TRACK17_TOKEN`) solo si vas a usar `source=track17`.
 
 ## Arranque local
 
 ```bash
 npm ci
-TRACK17_TOKEN="tu_token" npm start
+npm start
 ```
 
 Por defecto escucha en `8787`.
@@ -36,13 +35,11 @@ npm run imap:worker
 
 ## Variables de entorno
 
-- `TRACK17_TOKEN`: token de 17Track (obligatorio solo para `source=track17`).
 - `PORT`: puerto HTTP (default `8787`).
 - `DATA_DIR`: carpeta de persistencia (default `./data`).
 - `APP_LOG_LEVEL`: `debug|info|warn|error` (default `info`).
 - `APP_JSON_LIMIT`: límite de payload JSON (default `256kb`).
 - `APP_API_KEY`: si se define, protege la API (excepto `/health` y `/api/_build`) con `X-API-Key` o `Authorization: Bearer`.
-- `TRACK17_TIMEOUT_MS`: timeout de llamadas a 17Track (default `15000`).
 - `IMAP_ACCOUNTS_JSON`: array JSON de cuentas IMAP para el worker.
 - `IMAP_ACCOUNTS_FILE`: ruta a fichero JSON de cuentas (alternativa a `IMAP_ACCOUNTS_JSON`).
 - `IMAP_DEFAULT_OWNER`: owner por defecto para cuentas sin `owner`.
@@ -75,10 +72,10 @@ Integración con Home Assistant (notificaciones):
 - `HA_AUDIT_LOG_NAME`: nombre en logbook (default `Paquetes App`).
 - `HA_AUDIT_LOG_ENTITY_ID`: opcional, para asociar entradas a una entidad.
 
-## Worker IMAP (sin desactivar 17Track)
+## Worker IMAP
 
 El worker lee buzones y empuja eventos a `/api/owner/:owner/imap/ingest`.
-No sustituye ni desactiva `source=track17`; ambas fuentes pueden convivir.
+`source=imap` es la única fuente activa.
 
 Configura `IMAP_ACCOUNTS_JSON` con un objeto por cuenta:
 
@@ -186,6 +183,12 @@ curl -X DELETE http://localhost:8787/api/owner/owner_a/tracking/PH7NAW040990190G
 ## Persistencia
 
 El estado se guarda en `DATA_DIR/store.json`.
+
+Para purgar trackings legacy de `track17` y dejar solo `imap`:
+
+```bash
+npm run store:purge-track17
+```
 
 ## Troubleshooting de refresco
 

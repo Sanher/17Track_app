@@ -7,8 +7,10 @@ const STORE_FILE = "store.json";
 const APP_LOG_LEVEL = String(process.env.APP_LOG_LEVEL || "info").trim().toLowerCase();
 const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const APP_VERSION = `v${String(require("../package.json")?.version || "0.0.0")}`;
-const PACKAGE_SOURCES = new Set(["track17", "imap"]);
-const DEFAULT_PACKAGE_SOURCE = "track17";
+// v2 mode: IMAP-only source is always active; 17Track source is disabled.
+const TRACK17_ENABLED = false;
+const PACKAGE_SOURCES = TRACK17_ENABLED ? new Set(["track17", "imap"]) : new Set(["imap"]);
+const DEFAULT_PACKAGE_SOURCE = "imap";
 const APP_JSON_LIMIT = String(process.env.APP_JSON_LIMIT || "256kb").trim();
 const APP_API_KEY = String(process.env.APP_API_KEY || "").trim();
 const HA_AUDIT_LOG_ENABLED_RAW = process.env.HA_AUDIT_LOG_ENABLED;
@@ -435,6 +437,14 @@ async function load17TrackCarriersCached(forceRefresh = false) {
 }
 
 app.get("/api/carriers/17track_cached", async (req, res) => {
+  if (!TRACK17_ENABLED) {
+    return res.status(410).json({
+      ok: false,
+      error: "track17_disabled",
+      message: "Endpoint desactivado en modo IMAP-only."
+    });
+  }
+
   const qRaw = String(req.query?.q || "").trim();
   const q = normalizeAliasText(qRaw);
   const rawLimit = Number(req.query?.limit);
@@ -502,7 +512,6 @@ const DELIVERED_RETENTION_DAYS = Number(process.env.DELIVERED_RETENTION_DAYS || 
 const HA_URL = String(process.env.HA_URL || "").trim().replace(/\/$/, "");
 const HA_TOKEN = String(process.env.HA_TOKEN || "").trim();
 const HA_SCRIPT = String(process.env.HA_SCRIPT || "jarvis_17track_notify").trim();
-const TRACK17_TOKEN = String(process.env.TRACK17_TOKEN || "").trim();
 
 async function callHAService(domain, service, data) {
   if (!HA_URL || !HA_TOKEN) {
@@ -576,12 +585,6 @@ function validateStartupConfig() {
     process.exit(1);
   }
 
-  if (!TRACK17_TOKEN) {
-    logAt("warn", "track17_token_missing_track17_source_disabled", {
-      hint: "Puedes seguir usando source=imap y /api/owner/:owner/imap/ingest."
-    });
-  }
-
   if (APP_API_KEY) {
     logAt("warn", "api_key_auth_enabled", {
       hint: "Incluye X-API-Key o Authorization: Bearer <key> en los clientes."
@@ -599,6 +602,7 @@ function validateStartupConfig() {
     delivered_retention_days: DELIVERED_RETENTION_DAYS,
     ha_configured: !!(HA_URL && HA_TOKEN),
     json_limit: APP_JSON_LIMIT,
+    track17_enabled: TRACK17_ENABLED,
     api_key_enabled: !!APP_API_KEY,
     ha_audit_log_enabled: HA_AUDIT_LOG_ENABLED,
     ha_audit_log_level: HA_AUDIT_LOG_LEVEL

@@ -6,3 +6,4 @@ data/*
 .codex_seen/
 __pycache__/
 *.pyc
+progress.md

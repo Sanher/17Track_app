@@ -6,7 +6,7 @@ const { _test } = require("../src/index.js");
 test("retention only removes manually delivered packages", () => {
   const store = {
     owners: {
-      david: {
+      owner_a: {
         trackings: ["AUTO1", "MANUAL1", "PENDING1"],
         meta: {
           AUTO1: {
@@ -55,22 +55,22 @@ test("retention only removes manually delivered packages", () => {
 
   const result = _test.applyDeliveredRetentionForOwner(
     store,
-    "david",
+    "owner_a",
     new Date("2026-03-24T12:00:00Z")
   );
 
   assert.deepEqual(result, { removed: 1 });
-  assert.deepEqual(store.owners.david.trackings.sort(), ["AUTO1", "PENDING1"]);
-  assert.ok(store.owners.david.meta.AUTO1);
-  assert.equal(store.owners.david.meta.MANUAL1, undefined);
-  assert.ok(store.owners.david.last.AUTO1);
-  assert.equal(store.owners.david.last.MANUAL1, undefined);
+  assert.deepEqual(store.owners.owner_a.trackings.sort(), ["AUTO1", "PENDING1"]);
+  assert.ok(store.owners.owner_a.meta.AUTO1);
+  assert.equal(store.owners.owner_a.meta.MANUAL1, undefined);
+  assert.ok(store.owners.owner_a.last.AUTO1);
+  assert.equal(store.owners.owner_a.last.MANUAL1, undefined);
 });
 
 test("override rejects missing tracking without creating orphan metadata", () => {
   const store = {
     owners: {
-      david: {
+      owner_a: {
         trackings: ["KNOWN1"],
         meta: {
           KNOWN1: {
@@ -83,15 +83,15 @@ test("override rejects missing tracking without creating orphan metadata", () =>
     }
   };
 
-  const result = _test.setTrackingDeliveredOverride(store, "david", "MISSING1", true);
+  const result = _test.setTrackingDeliveredOverride(store, "owner_a", "MISSING1", true);
 
   assert.deepEqual(result, {
     ok: false,
     status: 404,
-    owner: "david",
+    owner: "owner_a",
     tracking: "MISSING1",
     error: "tracking_not_found"
   });
-  assert.deepEqual(store.owners.david.trackings, ["KNOWN1"]);
-  assert.deepEqual(Object.keys(store.owners.david.meta), ["KNOWN1"]);
+  assert.deepEqual(store.owners.owner_a.trackings, ["KNOWN1"]);
+  assert.deepEqual(Object.keys(store.owners.owner_a.meta), ["KNOWN1"]);
 });

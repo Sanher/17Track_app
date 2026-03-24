@@ -1156,6 +1156,12 @@ function deliveredAtForTracking(one, trackingMeta) {
   return fromLatest || fromMeta || fromOverride || null;
 }
 
+function manualDeliveredAtForRetention(trackingMeta = {}) {
+  // Auto-prune only starts after an explicit manual "delivered" action.
+  // Auto-detected delivered states from IMAP stay visible until the user confirms them.
+  return parseIsoDate(trackingMeta?.delivered_override_at) || parseIsoDate(trackingMeta?.delivered_at);
+}
+
 function updateDeliveredMetaForTracking(o, tn, one, now = new Date()) {
   if (!one || typeof one !== "object") return;
   const prev = getTrackingMeta(o, tn);
@@ -1211,9 +1217,10 @@ function applyDeliveredRetentionForOwner(store, owner, now = new Date()) {
   for (const tn of tns) {
     const one = last?.[tn];
     const meta = getTrackingMeta(o, tn);
-    if (!effectiveIsDelivered(one, meta)) continue;
+    // Auto-prune only packages explicitly marked as delivered by the user.
+    if (meta?.delivered_override !== true) continue;
 
-    const deliveredAt = deliveredAtForTracking(one, meta);
+    const deliveredAt = manualDeliveredAtForRetention(meta);
     if (!deliveredAt) continue;
 
     const ageMs = now.getTime() - deliveredAt.getTime();
@@ -1244,6 +1251,11 @@ function applyDeliveredRetentionAndPersist(store, owner, context = {}) {
       removed: r.removed,
       retention_days: DELIVERED_RETENTION_DAYS
     });
+    postHaAuditLogSafe("info", "delivered_retention_pruned", {
+      owner,
+      removed: r.removed,
+      retention_days: DELIVERED_RETENTION_DAYS
+    });
   }
   return r;
 }
@@ -1270,9 +1282,52 @@ function applyDeliveredRetentionForAllOwnersAndPersist(store, context = {}) {
       owners: touched,
       retention_days: DELIVERED_RETENTION_DAYS
     });
+    postHaAuditLogSafe("info", "delivered_retention_pruned_all", {
+      removed,
+      owners: touched,
+      retention_days: DELIVERED_RETENTION_DAYS
+    });
   }
 
   return { removed, owners: touched };
+}
+
+function setTrackingDeliveredOverride(store, ownerRaw, trackingRaw, delivered) {
+  const owner = String(ownerRaw || "").trim().toLowerCase();
+  const tracking = normalizeTracking(trackingRaw);
+  const o = getOwner(store, owner);
+  if (!o) return { ok: false, status: 404, owner, tracking, error: "owner_not_found" };
+  if (!ownerTrackings(o).includes(tracking)) {
+    return { ok: false, status: 404, owner, tracking, error: "tracking_not_found" };
+  }
+
+  o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
+  o.meta[tracking] = o.meta[tracking] && typeof o.meta[tracking] === "object" ? o.meta[tracking] : {};
+
+  if (delivered === true || delivered === false) {
+    o.meta[tracking].delivered_override = delivered;
+    if (delivered === true) {
+      const nowIso = new Date().toISOString();
+      o.meta[tracking].delivered_override_at = nowIso;
+      if (!parseIsoDate(o.meta[tracking].delivered_at)) {
+        o.meta[tracking].delivered_at = nowIso;
+      }
+    } else {
+      if (o.meta[tracking].delivered_override_at !== undefined) delete o.meta[tracking].delivered_override_at;
+      if (o.meta[tracking].delivered_at !== undefined) delete o.meta[tracking].delivered_at;
+    }
+  } else {
+    if (o.meta[tracking].delivered_override !== undefined) delete o.meta[tracking].delivered_override;
+    if (o.meta[tracking].delivered_override_at !== undefined) delete o.meta[tracking].delivered_override_at;
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    owner,
+    tracking,
+    delivered_override: o.meta[tracking].delivered_override ?? null
+  };
 }
 
 // Decide whether we should refresh now.
@@ -1928,37 +1983,24 @@ app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
   const delivered = req.body?.delivered;
 
   const store = loadStore();
-  store.owners[owner] = store.owners[owner] || { trackings: [], meta: {} };
-  const o = store.owners[owner];
-  o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
-  o.meta[tracking] = o.meta[tracking] && typeof o.meta[tracking] === "object" ? o.meta[tracking] : {};
-
-  if (delivered === true || delivered === false) {
-    o.meta[tracking].delivered_override = delivered;
-    if (delivered === true) {
-      const nowIso = new Date().toISOString();
-      o.meta[tracking].delivered_override_at = nowIso;
-      if (!parseIsoDate(o.meta[tracking].delivered_at)) {
-        o.meta[tracking].delivered_at = nowIso;
-      }
-    } else {
-      if (o.meta[tracking].delivered_override_at !== undefined) delete o.meta[tracking].delivered_override_at;
-      if (o.meta[tracking].delivered_at !== undefined) delete o.meta[tracking].delivered_at;
+  const result = setTrackingDeliveredOverride(store, owner, tracking, delivered);
+  if (!result.ok) {
+    if (result.error === "tracking_not_found") {
+      const payload = { req_id: req.reqId, owner, tracking, error: "tracking_not_found" };
+      logAt("warn", "tracking_override_rejected_missing_tracking", payload);
+      postHaAuditLogSafe("warn", "tracking_override_rejected_missing_tracking", payload);
     }
-  } else {
-    // clear override
-    if (o.meta[tracking].delivered_override !== undefined) delete o.meta[tracking].delivered_override;
-    if (o.meta[tracking].delivered_override_at !== undefined) delete o.meta[tracking].delivered_override_at;
+    return res.status(result.status).json(result);
   }
 
   saveStore(store);
   logAt("info", "tracking_override_updated", {
     req_id: req.reqId,
-    owner,
-    tracking,
-    delivered_override: o.meta[tracking].delivered_override ?? null
+    owner: result.owner,
+    tracking: result.tracking,
+    delivered_override: result.delivered_override
   });
-  return res.json({ ok: true, owner, tracking, delivered_override: o.meta[tracking].delivered_override ?? null });
+  return res.json(result);
 });
 
 // Set or clear a preferred carrier for a tracking.
@@ -2321,12 +2363,27 @@ function startBackgroundIfEnabled() {
   });
 }
 
-const port = process.env.PORT || 8787;
-validateStartupConfig();
-app.listen(port, () => {
-  console.log(`17Track app listening on ${port}`);
-  console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
-  console.log(`[APP] log level: ${APP_LOG_LEVEL}`);
-  console.log(`[APP] version: ${APP_VERSION}`);
-  startBackgroundIfEnabled();
-});
+function startServer(listenPort = process.env.PORT || 8787) {
+  validateStartupConfig();
+  return app.listen(listenPort, () => {
+    console.log(`17Track app listening on ${listenPort}`);
+    console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
+    console.log(`[APP] log level: ${APP_LOG_LEVEL}`);
+    console.log(`[APP] version: ${APP_VERSION}`);
+    startBackgroundIfEnabled();
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  app,
+  startServer,
+  _test: {
+    applyDeliveredRetentionForOwner,
+    manualDeliveredAtForRetention,
+    setTrackingDeliveredOverride
+  }
+};

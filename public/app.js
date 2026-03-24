@@ -48,7 +48,13 @@ function buildHeaders(extra = {}) {
 
 async function apiFetch(url, options = {}) {
   const headers = buildHeaders(options.headers || {});
-  const response = await fetch(url, { ...options, headers });
+  const rawUrl = String(url || "");
+  // Resolve relative to the current page so the same UI works both on direct port
+  // access and behind the Home Assistant ingress prefix.
+  const finalUrl = /^https?:\/\//i.test(rawUrl)
+    ? rawUrl
+    : new URL(rawUrl.replace(/^\/+/, ""), window.location.href).toString();
+  const response = await fetch(finalUrl, { ...options, headers });
   if (response.status === 401) {
     authPanel.classList.remove("hidden");
     throw new Error("unauthorized");

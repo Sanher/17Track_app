@@ -16,7 +16,7 @@ import os
 import re
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
@@ -38,6 +38,16 @@ DEFAULT_FETCH_LIMIT = 120
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_TIMEOUT_SEC = 20
 DEFAULT_DOTENV_PATH = ".env"
+
+# Temporary code-level pause without touching IMAP account config.
+# Re-enable this account on 2026-06-24 by removing this block.
+TEMPORARY_ACCOUNT_BLOCKS: dict[str, dict[str, Any]] = {
+    "mahlerthedog@gmail.com": {
+        "disabled_before": date(2026, 6, 24),
+        "disabled_until": "2026-06-24",
+        "reason": "IMAP 4 en pausa temporal hasta 2026-06-24",
+    }
+}
 
 TRACKING_STRONG_PATTERNS = [
     re.compile(r"\b1Z[0-9A-Z]{16}\b"),  # UPS
@@ -590,6 +600,18 @@ def resolve_secret(raw_value: Any, env_key_name: Any) -> str:
     return str(os.getenv(env_key, "")).strip()
 
 
+def temporary_account_block_for_email(email_addr: str, today: date | None = None) -> dict[str, Any] | None:
+    rule = TEMPORARY_ACCOUNT_BLOCKS.get(str(email_addr or "").strip().lower())
+    if not rule:
+        return None
+
+    current_date = today or datetime.now(timezone.utc).date()
+    disabled_before = rule.get("disabled_before")
+    if isinstance(disabled_before, date) and current_date < disabled_before:
+        return rule
+    return None
+
+
 def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("account_not_object")
@@ -709,6 +731,17 @@ def load_accounts() -> list[dict[str, Any]]:
         try:
             normalized = normalize_account(account, default_owner=default_owner)
             if normalized["enabled"]:
+                temporary_block = temporary_account_block_for_email(normalized["email"])
+                if temporary_block:
+                    log(
+                        "info",
+                        "imap_account_skipped_temporarily_disabled",
+                        idx=idx,
+                        email=normalized["email"],
+                        disabled_until=temporary_block.get("disabled_until"),
+                        reason=temporary_block.get("reason"),
+                    )
+                    continue
                 out.append(normalized)
             else:
                 log("info", "imap_account_skipped_disabled", idx=idx, email=normalized["email"])

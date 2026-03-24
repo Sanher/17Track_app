@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import date
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import patch
@@ -134,6 +135,23 @@ class AccountNormalizationTests(unittest.TestCase):
                 worker.load_accounts()
 
         self.assertIn("password_missing", str(ctx.exception))
+
+    def test_temporary_account_block_for_email_is_active_before_deadline(self):
+        blocked = worker.temporary_account_block_for_email(
+            "mahlerthedog@gmail.com",
+            today=date(2026, 3, 24),
+        )
+
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked["disabled_until"], "2026-06-24")
+
+    def test_temporary_account_block_for_email_expires_on_deadline(self):
+        blocked = worker.temporary_account_block_for_email(
+            "mahlerthedog@gmail.com",
+            today=date(2026, 6, 24),
+        )
+
+        self.assertIsNone(blocked)
 
 
 class FilteringTests(unittest.TestCase):

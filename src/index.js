@@ -1,4 +1,5 @@
 const express = require("express");
+const path = require("path");
 const { readJson, writeJson, DATA_DIR } = require("./storage");
 const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./track17");
 const { CARRIERS } = require("./carriers");
@@ -18,6 +19,7 @@ const HA_AUDIT_LOG_ENABLED = boolFromAny(HA_AUDIT_LOG_ENABLED_RAW, false);
 const HA_AUDIT_LOG_LEVEL = String(process.env.HA_AUDIT_LOG_LEVEL || "warn").trim().toLowerCase();
 const HA_AUDIT_LOG_NAME = String(process.env.HA_AUDIT_LOG_NAME || "Paquetes App").trim();
 const HA_AUDIT_LOG_ENTITY_ID = String(process.env.HA_AUDIT_LOG_ENTITY_ID || "").trim();
+const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -78,6 +80,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const app = express();
 
 app.use(express.json({ limit: APP_JSON_LIMIT }));
+app.use(express.static(PUBLIC_DIR));
+app.get("/ui", (_req, res) => res.sendFile(path.join(PUBLIC_DIR, "index.html")));
 
 function extractRequestApiKey(req) {
   const byHeader = String(req.get("x-api-key") || "").trim();
@@ -1046,6 +1050,43 @@ function trackingSource(o, tn) {
   return normalizePackageSource(meta?.source, DEFAULT_PACKAGE_SOURCE) || DEFAULT_PACKAGE_SOURCE;
 }
 
+function effectiveCarrierName(one, trackingMeta = {}) {
+  const override = String(trackingMeta?.carrier_name_override || "").trim();
+  if (override) return override;
+  const latest = String(one?.carrierName || "").trim();
+  return latest || null;
+}
+
+function deliveredOverrideValue(trackingMeta = {}) {
+  return trackingMeta?.delivered_override === true || trackingMeta?.delivered_override === false
+    ? trackingMeta.delivered_override
+    : null;
+}
+
+function serializeTrackingItem(owner, o, tn) {
+  const tracking = normalizeTracking(tn);
+  const meta = getTrackingMeta(o, tracking);
+  const last = ownerLastMap(o);
+  const one = last?.[tracking];
+
+  return {
+    owner,
+    tracking,
+    source: trackingSource(o, tracking),
+    imap_account: String(meta?.imap_account || "").trim() || null,
+    note: String(meta?.note || "").trim() || "",
+    carrier_name: effectiveCarrierName(one, meta),
+    carrier_name_detected: String(one?.carrierName || "").trim() || null,
+    carrier_name_override: String(meta?.carrier_name_override || "").trim() || null,
+    carrier_override: metaCarrierKey(meta) ?? null,
+    delivered_override: deliveredOverrideValue(meta),
+    delivered_effective: effectiveIsDelivered(one, meta),
+    delivered_at: String(meta?.delivered_at || "").trim() || null,
+    out_for_delivery: effectiveIsOutForDelivery(one),
+    one: shortOne(one)
+  };
+}
+
 function boolFromAny(v, def = false) {
   if (v === undefined || v === null || v === "") return def;
   if (typeof v === "boolean") return v;
@@ -1207,6 +1248,33 @@ function applyDeliveredRetentionAndPersist(store, owner, context = {}) {
   return r;
 }
 
+function applyDeliveredRetentionForAllOwnersAndPersist(store, context = {}) {
+  const now = context.now instanceof Date ? context.now : new Date();
+  const owners = ownersFromStore(store);
+  let removed = 0;
+  const touched = [];
+
+  for (const owner of owners) {
+    const r = applyDeliveredRetentionForOwner(store, owner, now);
+    if (r.removed > 0) {
+      removed += r.removed;
+      touched.push({ owner, removed: r.removed });
+    }
+  }
+
+  if (removed > 0) {
+    saveStore(store);
+    logAt("info", "delivered_retention_pruned_all", {
+      req_id: context.reqId ?? null,
+      removed,
+      owners: touched,
+      retention_days: DELIVERED_RETENTION_DAYS
+    });
+  }
+
+  return { removed, owners: touched };
+}
+
 // Decide whether we should refresh now.
 // Policy:
 // - If owner has pending trackings => refresh every normalIntervalMin
@@ -1272,7 +1340,7 @@ function buildStatusLine(one, note, opts = {}) {
   const tn = one?.number || "";
   const desc = one?.latest?.description || "";
   const st = one?.latest?.status || "";
-  const carrier = one?.carrierName || "";
+  const carrier = effectiveCarrierName(one, opts?.trackingMeta || {}) || "";
   const loc = one?.latest?.location || "";
 
   const extra = [carrier, loc].filter(Boolean).join(" · ");
@@ -1388,28 +1456,7 @@ app.get("/api/owner/:owner/trackings", (req, res) => {
   const o = getOwner(store, owner);
   if (!o) return res.status(404).json({ error: "owner no existe" });
 
-  const tns = ownerTrackings(o);
-  const last = ownerLastMap(o);
-
-  const items = tns.map((tn) => {
-    const meta = getTrackingMeta(o, tn);
-    const delivered_override =
-      meta?.delivered_override === true || meta?.delivered_override === false
-        ? meta.delivered_override
-        : null;
-
-    return {
-      tracking: tn,
-      source: trackingSource(o, tn),
-      imap_account: String(meta?.imap_account || "").trim() || null,
-      note: String(meta?.note || "").trim() || "",
-      carrier_override: metaCarrierKey(meta) ?? null,
-      delivered_override,
-      delivered_effective: effectiveIsDelivered(last?.[tn], meta),
-      out_for_delivery: effectiveIsOutForDelivery(last?.[tn]),
-      one: shortOne(last?.[tn])
-    };
-  });
+  const items = ownerTrackings(o).map((tn) => serializeTrackingItem(owner, o, tn));
 
   return res.json({ ok: true, owner, count: items.length, items });
 });
@@ -1430,20 +1477,15 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
     return res.status(404).json({ ok: false, owner, query: q, error: "no_match" });
   }
   const hit = matches[0];
-  const last = ownerLastMap(o);
-  const meta = getTrackingMeta(o, hit.tracking);
-  const delivered_override =
-    meta?.delivered_override === true || meta?.delivered_override === false
-      ? meta.delivered_override
-      : null;
+  const item = serializeTrackingItem(owner, o, hit.tracking);
 
   return res.json({
     ok: true,
     owner,
     query: q,
     tracking: hit.tracking,
-    source: trackingSource(o, hit.tracking),
-    imap_account: String(meta?.imap_account || "").trim() || null,
+    source: item.source,
+    imap_account: item.imap_account,
     note: hit.note || "",
     score: hit.score,
     matches: matches.map((m) => ({
@@ -1452,11 +1494,14 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
       note: m.note || "",
       score: m.score
     })),
-    carrier_override: metaCarrierKey(meta) ?? null,
-    delivered_override,
-    delivered_effective: effectiveIsDelivered(last?.[hit.tracking], meta),
-    out_for_delivery: effectiveIsOutForDelivery(last?.[hit.tracking]),
-    one: shortOne(last?.[hit.tracking])
+    carrier_name: item.carrier_name,
+    carrier_name_detected: item.carrier_name_detected,
+    carrier_name_override: item.carrier_name_override,
+    carrier_override: item.carrier_override,
+    delivered_override: item.delivered_override,
+    delivered_effective: item.delivered_effective,
+    out_for_delivery: item.out_for_delivery,
+    one: item.one
   });
 });
 
@@ -1467,6 +1512,45 @@ app.get("/api/store", (_req, res) => {
   logAt("warn", "store_dump_requested", payload);
   postHaAuditLogSafe("warn", "store_dump_requested", payload);
   res.json(store);
+});
+
+app.get("/api/ui/owners", (req, res) => {
+  const store = loadStore();
+  applyDeliveredRetentionForAllOwnersAndPersist(store, { reqId: req.reqId });
+
+  const owners = ownersFromStore(store)
+    .sort((a, b) => a.localeCompare(b))
+    .map((owner) => {
+      const o = getOwner(store, owner);
+      if (!o) return null;
+
+      const items = ownerTrackings(o)
+        .map((tn) => serializeTrackingItem(owner, o, tn))
+        .sort((a, b) => {
+          if (a.delivered_effective !== b.delivered_effective) return a.delivered_effective ? 1 : -1;
+          const aTime = Date.parse(a?.one?.latest?.time || "") || 0;
+          const bTime = Date.parse(b?.one?.latest?.time || "") || 0;
+          return bTime - aTime;
+        });
+
+      return {
+        owner,
+        count: items.length,
+        delivered_count: items.filter((item) => item.delivered_effective).length,
+        pending_count: items.filter((item) => !item.delivered_effective).length,
+        items
+      };
+    })
+    .filter(Boolean);
+
+  const totalItems = owners.reduce((acc, owner) => acc + owner.count, 0);
+  return res.json({
+    ok: true,
+    owners_count: owners.length,
+    total_items: totalItems,
+    delivered_retention_days: DELIVERED_RETENTION_DAYS,
+    owners
+  });
 });
 
 app.get("/api/owner/:owner/imap/accounts", (req, res) => {
@@ -1646,6 +1730,54 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
     ingested: accepted.length,
     skipped_invalid,
     accepted
+  });
+});
+
+app.patch("/api/owner/:owner/tracking/:tracking/meta", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const tracking = normalizeTracking(req.params.tracking);
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ ok: false, owner, tracking, error: "owner_not_found" });
+  if (!ownerTrackings(o).includes(tracking)) {
+    return res.status(404).json({ ok: false, owner, tracking, error: "tracking_not_found" });
+  }
+
+  const nextMeta = { ...getTrackingMeta(o, tracking) };
+  const hadNote = Object.prototype.hasOwnProperty.call(req.body || {}, "note");
+  const hadCarrierName =
+    Object.prototype.hasOwnProperty.call(req.body || {}, "carrier_name") ||
+    Object.prototype.hasOwnProperty.call(req.body || {}, "carrierName");
+
+  if (hadNote) {
+    const note = String(req.body?.note || "").trim();
+    if (note) nextMeta.note = note;
+    else delete nextMeta.note;
+  }
+
+  if (hadCarrierName) {
+    const carrierName = String(req.body?.carrier_name ?? req.body?.carrierName ?? "").trim();
+    if (carrierName) nextMeta.carrier_name_override = carrierName;
+    else delete nextMeta.carrier_name_override;
+  }
+
+  setTrackingMeta(o, tracking, nextMeta);
+  saveStore(store);
+
+  const payload = {
+    req_id: req.reqId,
+    owner,
+    tracking,
+    note: String(nextMeta.note || "").trim() || null,
+    carrier_name_override: String(nextMeta.carrier_name_override || "").trim() || null
+  };
+  logAt("info", "tracking_meta_updated", payload);
+
+  return res.json({
+    ok: true,
+    owner,
+    tracking,
+    item: serializeTrackingItem(owner, o, tracking)
   });
 });
 
@@ -2031,7 +2163,10 @@ app.get("/api/owner/:owner/status", (req, res) => {
     .filter((x) => x.one && matchesFilter(x.one, filter, x.meta));
 
   if (format === "text") {
-    const lines = items.map((x) => buildStatusLine(x.one, x.note, { delivered_override_applied: x.delivered_override_applied }));
+    const lines = items.map((x) => buildStatusLine(x.one, x.note, {
+      delivered_override_applied: x.delivered_override_applied,
+      trackingMeta: x.meta
+    }));
     return res.type("text/plain").send(lines.join("\n"));
   }
 
@@ -2045,6 +2180,7 @@ app.get("/api/owner/:owner/status", (req, res) => {
       source: trackingSource(o, x.tn),
       one: x.one,
       note: x.note,
+      carrier_name: effectiveCarrierName(x.one, x.meta),
       delivered_override: (x.meta?.delivered_override === true || x.meta?.delivered_override === false) ? x.meta.delivered_override : null
     }))
   });

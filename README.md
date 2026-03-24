@@ -12,6 +12,7 @@ Servidor Node.js para gestionar paquetes por owner (por ejemplo `owner_a` y `own
 - Refresco manual y refresco condicional en background.
 - Logs estructurados para requests y auditoría.
 - Worker IMAP para ingesta de eventos desde buzones (Gmail/Outlook).
+- Interfaz web ligera para revisar paquetes por owner y corregir alias/courier.
 
 ## Requisitos
 
@@ -47,7 +48,7 @@ npm run imap:worker
 - `IMAP_INGEST_BASE_URL`: base URL del backend (default `http://127.0.0.1:8787`).
 - `IMAP_INGEST_API_KEY`: API key para `POST /imap/ingest` (si no se define, usa `APP_API_KEY`).
 - `IMAP_WORKER_STATE_PATH`: estado del worker (default `./data/imap_worker_state.json`).
-- `IMAP_WORKER_LOOKBACK_DAYS`: dias a revisar en primera ejecucion (default `30`).
+- `IMAP_WORKER_LOOKBACK_DAYS`: dias a revisar en primera ejecucion (default `60`).
 - `IMAP_WORKER_FETCH_LIMIT`: maximo de mensajes nuevos por cuenta y ejecucion (default `120`).
 - `IMAP_INGEST_BATCH_SIZE`: tamano de lote por POST (default `100`).
 - `IMAP_INGEST_TIMEOUT_SEC`: timeout HTTP/IMAP del worker (default `20`).
@@ -76,6 +77,17 @@ Integración con Home Assistant (notificaciones):
 
 El worker lee buzones y empuja eventos a `/api/owner/:owner/imap/ingest`.
 `source=imap` es la única fuente activa.
+En primera ejecución, el lookback por defecto queda limitado a los últimos dos meses.
+
+## UI web
+
+La app sirve una UI en `/` y `/ui` para uso local o via ingress del add-on.
+
+- Agrupa paquetes por owner.
+- Permite editar alias y courier manual para IMAP.
+- Permite marcar `delivered` o `undelivered`.
+- Permite borrar entradas antiguas o incorrectas.
+- La retención de entregados sigue en `7` días si no se revierten a `undelivered`.
 
 Configura `IMAP_ACCOUNTS_JSON` con un objeto por cuenta:
 
@@ -148,10 +160,12 @@ Ejemplo cuenta con filtro "solo Amazon para Mislata":
 - `GET /api/owner/:owner/resolve?q=...`
 - `POST /api/owner/:owner/refresh_if_needed`
 - `GET /api/bg/status`
+- `GET /api/ui/owners`
 - `GET /api/owner/:owner/imap/accounts`
 - `POST /api/owner/:owner/imap/accounts`
 - `DELETE /api/owner/:owner/imap/accounts/:email`
 - `POST /api/owner/:owner/imap/ingest`
+- `PATCH /api/owner/:owner/tracking/:tracking/meta`
 
 Nota de seguridad: `GET /api/store` devuelve el estado completo. En producción activa `APP_API_KEY`.
 

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Paquetes IMAP</title>
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Home Assistant ingress</p>
+        <h1>Paquetes IMAP</h1>
+        <p class="hero-text">
+          Vista operativa por owner para revisar, corregir y limpiar paquetes escaneados por correo.
+        </p>
+      </div>
+      <div class="hero-actions">
+        <button id="refreshButton" class="primary-button" type="button">Actualizar</button>
+        <button id="authToggleButton" class="ghost-button" type="button">API key</button>
+      </div>
+    </header>
+
+    <section id="authPanel" class="auth-panel hidden">
+      <label class="field">
+        <span>API key</span>
+        <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Solo si APP_API_KEY esta activo">
+      </label>
+      <div class="auth-actions">
+        <button id="saveApiKeyButton" class="primary-button" type="button">Guardar</button>
+        <button id="clearApiKeyButton" class="ghost-button" type="button">Borrar</button>
+      </div>
+    </section>
+
+    <section class="toolbar">
+      <label class="field search-field">
+        <span>Buscar</span>
+        <input id="searchInput" type="search" autocomplete="off" placeholder="Owner, tracking, alias, courier o estado">
+      </label>
+      <div id="statsBar" class="stats-bar"></div>
+    </section>
+
+    <section id="statusBar" class="status-bar hidden"></section>
+    <main id="ownersRoot" class="owners-root"></main>
+  </div>
+
+  <template id="ownerTemplate">
+    <details class="owner-panel" open>
+      <summary class="owner-summary">
+        <div>
+          <h2 class="owner-title"></h2>
+          <p class="owner-meta"></p>
+        </div>
+        <span class="owner-chip"></span>
+      </summary>
+      <div class="owner-items"></div>
+    </details>
+  </template>
+
+  <template id="itemTemplate">
+    <article class="item-card">
+      <div class="item-topline">
+        <div>
+          <p class="item-id"></p>
+          <p class="item-account"></p>
+        </div>
+        <div class="item-flags">
+          <span class="status-pill"></span>
+          <span class="state-pill"></span>
+        </div>
+      </div>
+
+      <div class="item-grid">
+        <label class="field">
+          <span>Alias</span>
+          <input class="note-input" type="text" autocomplete="off" placeholder="Alias visible">
+        </label>
+
+        <label class="field">
+          <span>Courier</span>
+          <input class="carrier-input" type="text" autocomplete="off" placeholder="Courier editable">
+        </label>
+      </div>
+
+      <div class="item-details"></div>
+
+      <div class="item-actions">
+        <button class="save-button primary-button" type="button">Guardar</button>
+        <button class="delivered-button soft-button" type="button">Delivered</button>
+        <button class="undelivered-button soft-button" type="button">Undelivered</button>
+        <button class="delete-button danger-button" type="button">Borrar</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="./app.js"></script>
+</body>
+</html>

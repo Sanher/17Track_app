@@ -113,6 +113,30 @@ class AccountNormalizationTests(unittest.TestCase):
         self.assertEqual(accounts[0]["owner"], "owner_file")
         self.assertEqual(accounts[0]["password"], "pw_from_file")
 
+    def test_load_accounts_defaults_owner_to_unnamed(self):
+        with patch.dict(
+            os.environ,
+            {
+                "IMAP_ACCOUNTS_JSON": json.dumps(
+                    [
+                        {
+                            "email": "unnamed@gmail.com",
+                            "auth": "password",
+                            "password_env": "PW_UNNAMED",
+                        }
+                    ]
+                ),
+                "PW_UNNAMED": "pw_unnamed",
+            },
+            clear=False,
+        ):
+            os.environ.pop("IMAP_DEFAULT_OWNER", None)
+            accounts = worker.load_accounts()
+
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["owner"], "unnamed")
+        self.assertEqual(accounts[0]["password"], "pw_unnamed")
+
     def test_load_accounts_raises_when_password_missing(self):
         with patch.dict(
             os.environ,

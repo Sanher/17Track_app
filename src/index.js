@@ -5,7 +5,7 @@ const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./tra
 const { CARRIERS } = require("./carriers");
 
 const STORE_FILE = "store.json";
-const APP_LOG_LEVEL = String(process.env.APP_LOG_LEVEL || "info").trim().toLowerCase();
+const APP_LOG_LEVEL = "info";
 const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const APP_VERSION = `v${String(require("../package.json")?.version || "0.0.0")}`;
 // v2 mode: IMAP-only source is always active; 17Track source is disabled.
@@ -16,7 +16,7 @@ const APP_JSON_LIMIT = String(process.env.APP_JSON_LIMIT || "256kb").trim();
 const APP_API_KEY = String(process.env.APP_API_KEY || "").trim();
 const HA_AUDIT_LOG_ENABLED_RAW = process.env.HA_AUDIT_LOG_ENABLED;
 const HA_AUDIT_LOG_ENABLED = boolFromAny(HA_AUDIT_LOG_ENABLED_RAW, false);
-const HA_AUDIT_LOG_LEVEL = String(process.env.HA_AUDIT_LOG_LEVEL || "warn").trim().toLowerCase();
+const HA_AUDIT_LOG_LEVEL = String(process.env.HA_AUDIT_LOG_LEVEL || "info").trim().toLowerCase();
 const HA_AUDIT_LOG_NAME = String(process.env.HA_AUDIT_LOG_NAME || "Paquetes App").trim();
 const HA_AUDIT_LOG_ENTITY_ID = String(process.env.HA_AUDIT_LOG_ENTITY_ID || "").trim();
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
@@ -163,11 +163,6 @@ app.use((req, res, next) => {
   const started = Date.now();
   const reqId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   req.reqId = reqId;
-  logAt("debug", "http_request_start", {
-    req_id: reqId,
-    method: req.method,
-    path: req.originalUrl
-  });
   res.on("finish", () => {
     const ms = Date.now() - started;
     const level = res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info";
@@ -495,7 +490,7 @@ app.get("/api/carriers/17track_cached", async (req, res) => {
 // Enable with: BG_ENABLED=1 (also accepts true/yes/on)
 // Interval: BG_INTERVAL_MIN (default 15)
 // Refresh policy: BG_NORMAL_INTERVAL_MIN (default 45), BG_SLOW_HOURS (default "8,20")
-// Rate limit between trackings: BG_DELAY_MS (default 5000)
+// Rate limit between trackings: BG_DELAY_MS (default 0 in IMAP-only mode)
 // Delivered retention: DELIVERED_RETENTION_DAYS (default 7, <=0 disables auto-removal)
 // Home Assistant notify target:
 //   HA_URL (e.g. http://homeassistant:8123 or http://192.168.x.x:8123)
@@ -510,7 +505,7 @@ const BG_SLOW_HOURS = String(process.env.BG_SLOW_HOURS || "8,20")
   .split(",")
   .map((x) => Number(String(x).trim()))
   .filter((n) => !isNaN(n));
-const BG_DELAY_MS = Number(process.env.BG_DELAY_MS || 5000);
+const BG_DELAY_MS = Number(process.env.BG_DELAY_MS || 0);
 const DELIVERED_RETENTION_DAYS = Number(process.env.DELIVERED_RETENTION_DAYS || 7);
 
 const HA_URL = String(process.env.HA_URL || "").trim().replace(/\/$/, "");
@@ -544,7 +539,6 @@ async function callHAService(domain, service, data) {
   }
 
   // HA returns an array; we don't really need it.
-  logAt("debug", "ha_service_call_ok", { domain, service });
   return await r.json().catch(() => ({}));
 }
 
@@ -562,6 +556,10 @@ function isPositiveNumber(n) {
   return Number.isFinite(n) && n > 0;
 }
 
+function isNonNegativeNumber(n) {
+  return Number.isFinite(n) && n >= 0;
+}
+
 function validateStartupConfig() {
   const missing = [];
   if (!HA_URL) missing.push("HA_URL");
@@ -572,11 +570,10 @@ function validateStartupConfig() {
   if (!isPositiveNumber(Number(process.env.PORT || 8787))) invalid.push("PORT");
   if (!isPositiveNumber(BG_INTERVAL_MIN)) invalid.push("BG_INTERVAL_MIN");
   if (!isPositiveNumber(BG_NORMAL_INTERVAL_MIN)) invalid.push("BG_NORMAL_INTERVAL_MIN");
-  if (!isPositiveNumber(BG_DELAY_MS)) invalid.push("BG_DELAY_MS");
+  if (!isNonNegativeNumber(BG_DELAY_MS)) invalid.push("BG_DELAY_MS");
   if (!(Number.isFinite(DELIVERED_RETENTION_DAYS) && DELIVERED_RETENTION_DAYS >= 0)) invalid.push("DELIVERED_RETENTION_DAYS");
 
   const allowedLogLevels = new Set(Object.keys(LOG_LEVELS));
-  if (!allowedLogLevels.has(APP_LOG_LEVEL)) invalid.push("APP_LOG_LEVEL");
   if (!allowedLogLevels.has(HA_AUDIT_LOG_LEVEL)) invalid.push("HA_AUDIT_LOG_LEVEL");
 
   if (missing.length || invalid.length) {
@@ -833,7 +830,12 @@ async function bgRunOnce() {
     }
 
     bgState.lastSummary = summary;
-    postHaAuditLogSafe("info", "bg_run_summary", summary);
+    logAt("info", "bg_run_summary", summary);
+    // Keep periodic scheduler heartbeats out of HA logbook even at info level.
+    // Otherwise a 15 min interval would flood Logbook with low-value entries.
+    if (summary.notifications_sent > 0 || summary.delivered_pruned > 0) {
+      postHaAuditLogSafe("info", "bg_run_summary", summary);
+    }
 
     return { ok: true, ran: true, summary };
   } catch (e) {

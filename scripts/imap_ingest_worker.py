@@ -725,7 +725,7 @@ def load_accounts() -> list[dict[str, Any]]:
     if not isinstance(parsed, list):
         raise RuntimeError("IMAP_ACCOUNTS_JSON must be a JSON array")
 
-    default_owner = str(os.getenv("IMAP_DEFAULT_OWNER") or "").strip().lower()
+    default_owner = str(os.getenv("IMAP_DEFAULT_OWNER") or "unnamed").strip().lower()
     out: list[dict[str, Any]] = []
     for idx, account in enumerate(parsed):
         try:

@@ -34,16 +34,62 @@
     </section>
 
     <section class="toolbar">
-      <label class="field search-field">
-        <span>Buscar</span>
-        <input id="searchInput" type="search" autocomplete="off" placeholder="Owner, tracking, alias, courier o estado">
-      </label>
+      <div class="toolbar-filters">
+        <label class="field search-field">
+          <span>Buscar</span>
+          <input id="searchInput" type="search" autocomplete="off" placeholder="Owner, tracking, alias, courier, asunto o remitente">
+        </label>
+        <label class="field compact-field">
+          <span>Desde</span>
+          <input id="dateFromInput" type="date">
+        </label>
+        <label class="field compact-field">
+          <span>Hasta</span>
+          <input id="dateToInput" type="date">
+        </label>
+        <button id="clearFiltersButton" class="ghost-button" type="button">Limpiar filtros</button>
+      </div>
       <div id="statsBar" class="stats-bar"></div>
+    </section>
+
+    <section id="selectionBar" class="selection-bar hidden">
+      <p id="selectionSummary" class="selection-summary"></p>
+      <div class="selection-actions">
+        <button id="selectVisibleButton" class="ghost-button" type="button">Seleccionar visibles</button>
+        <button id="clearSelectionButton" class="ghost-button" type="button">Limpiar seleccion</button>
+        <button id="bulkDeliveredButton" class="soft-button" type="button">Delivered</button>
+        <button id="bulkUndeliveredButton" class="soft-button" type="button">Undelivered</button>
+        <button id="bulkNotPackageButton" class="soft-button" type="button">No es paquete</button>
+        <button id="bulkDeleteButton" class="danger-button" type="button">Borrar</button>
+      </div>
+    </section>
+
+    <section id="cleanupBar" class="selection-bar cleanup-bar">
+      <p class="selection-summary">Limpieza por antiguedad</p>
+      <div class="selection-actions">
+        <label class="field compact-field cleanup-field">
+          <span>Conservar dias</span>
+          <input id="olderThanDaysInput" type="number" min="1" step="1" inputmode="numeric" placeholder="60">
+        </label>
+        <button id="selectOlderButton" class="ghost-button" type="button">Seleccionar anteriores</button>
+        <button id="deleteOlderButton" class="danger-button" type="button">Borrar anteriores</button>
+      </div>
     </section>
 
     <section id="statusBar" class="status-bar hidden"></section>
     <main id="ownersRoot" class="owners-root"></main>
   </div>
+
+  <dialog id="confirmDialog" class="confirm-dialog">
+    <form method="dialog" class="confirm-card">
+      <p id="confirmDialogTitle" class="confirm-title">Confirmar accion</p>
+      <p id="confirmDialogMessage" class="confirm-message"></p>
+      <div class="selection-actions">
+        <button id="confirmDialogCancel" class="ghost-button" value="cancel" type="submit">Cancelar</button>
+        <button id="confirmDialogAccept" class="danger-button" value="accept" type="submit">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
 
   <template id="ownerTemplate">
     <details class="owner-panel" open>
@@ -60,14 +106,21 @@
 
   <template id="itemTemplate">
     <article class="item-card">
+      <div class="item-topline item-topline-selectable">
+        <label class="item-select-wrap">
+          <input class="item-select" type="checkbox">
+          <span>Seleccionar</span>
+        </label>
+        <div class="item-flags">
+          <span class="status-pill"></span>
+          <span class="state-pill"></span>
+        </div>
+      </div>
+
       <div class="item-topline">
         <div>
           <p class="item-id"></p>
           <p class="item-account"></p>
-        </div>
-        <div class="item-flags">
-          <span class="status-pill"></span>
-          <span class="state-pill"></span>
         </div>
       </div>
 
@@ -89,6 +142,7 @@
         <button class="save-button primary-button" type="button">Guardar</button>
         <button class="delivered-button soft-button" type="button">Delivered</button>
         <button class="undelivered-button soft-button" type="button">Undelivered</button>
+        <button class="not-package-button soft-button" type="button">No es paquete</button>
         <button class="delete-button danger-button" type="button">Borrar</button>
       </div>
     </article>

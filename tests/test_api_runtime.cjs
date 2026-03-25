@@ -95,3 +95,41 @@ test("override rejects missing tracking without creating orphan metadata", () =>
   assert.deepEqual(store.owners.owner_a.trackings, ["KNOWN1"]);
   assert.deepEqual(Object.keys(store.owners.owner_a.meta), ["KNOWN1"]);
 });
+
+test("mark not package removes tracking and stores ignore rule terms", () => {
+  const store = {
+    owners: {
+      owner_a: {
+        trackings: ["FALSE1"],
+        meta: {
+          FALSE1: {
+            source: "imap",
+            imap_account: "owner@gmail.com"
+          }
+        },
+        last: {
+          FALSE1: {
+            number: "FALSE1",
+            latest: {
+              description: "Boleto Euromillones ICOVVTV09154 validado"
+            },
+            flags: { isDelivered: false }
+          }
+        },
+        imap_ignore_rules: []
+      }
+    }
+  };
+
+  const result = _test.markTrackingAsNotPackage(store, "owner_a", "FALSE1");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.removed, true);
+  assert.deepEqual(store.owners.owner_a.trackings, []);
+  assert.equal(store.owners.owner_a.imap_ignore_rules.length, 1);
+  assert.equal(store.owners.owner_a.imap_ignore_rules[0].account_email, "owner@gmail.com");
+  assert.deepEqual(
+    store.owners.owner_a.imap_ignore_rules[0].description_terms,
+    ["boleto", "euromillones", "validado"]
+  );
+});

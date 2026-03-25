@@ -44,6 +44,7 @@ body {
 .hero,
 .auth-panel,
 .toolbar,
+.selection-bar,
 .owner-panel,
 .item-card,
 .status-bar {
@@ -96,6 +97,7 @@ body {
 
 .auth-panel,
 .toolbar,
+.selection-bar,
 .status-bar {
   margin-top: 18px;
   padding: 18px 20px;
@@ -109,6 +111,72 @@ body {
   justify-content: space-between;
   gap: 18px;
   align-items: end;
+}
+
+.toolbar-filters,
+.selection-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.toolbar-filters {
+  flex: 1 1 auto;
+}
+
+.selection-bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+}
+
+.cleanup-bar {
+  align-items: end;
+}
+
+.selection-summary {
+  margin: 0;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.confirm-dialog {
+  border: none;
+  padding: 0;
+  background: transparent;
+}
+
+.confirm-dialog::backdrop {
+  background: rgba(23, 33, 32, 0.35);
+  backdrop-filter: blur(3px);
+}
+
+.confirm-card {
+  width: min(520px, calc(100vw - 32px));
+  margin: 0;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-xl);
+  background: var(--panel-strong);
+  box-shadow: var(--shadow);
+}
+
+.confirm-title {
+  margin: 0 0 10px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.5rem;
+}
+
+.confirm-message {
+  margin: 0 0 18px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.cleanup-field {
+  min-width: 150px;
 }
 
 .status-bar {
@@ -153,6 +221,10 @@ body {
 
 .search-field {
   flex: 1 1 360px;
+}
+
+.compact-field {
+  flex: 0 1 170px;
 }
 
 .stats-bar {
@@ -237,6 +309,26 @@ body {
   justify-content: space-between;
   gap: 12px;
   align-items: start;
+}
+
+.item-topline-selectable {
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.item-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.item-select-wrap input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
 }
 
 .item-id {
@@ -351,6 +443,7 @@ button:disabled {
 
   .hero,
   .toolbar,
+  .selection-bar,
   .owner-summary,
   .item-topline {
     flex-direction: column;
@@ -361,6 +454,8 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .toolbar-filters,
+  .selection-actions,
   .item-flags,
   .stats-bar {
     justify-content: start;

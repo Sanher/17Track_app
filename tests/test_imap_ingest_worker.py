@@ -227,6 +227,66 @@ class FilteringTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(reason.startswith("missing_keywords_all:"))
 
+    def test_message_matches_ignore_rule_for_same_account(self):
+        matched, reason = worker.message_matches_ignore_rule(
+            account={"email": "owner@gmail.com"},
+            subject="Boleto Euromillones ICOVVTV09154 validado",
+            body="Consulta tu combinacion",
+            ignore_rules=[
+                {
+                    "id": "rule_1",
+                    "kind": "subject_terms_all",
+                    "account_email": "owner@gmail.com",
+                    "description_terms": ["boleto", "euromillones", "validado"],
+                    "active": True,
+                }
+            ],
+        )
+
+        self.assertTrue(matched)
+        self.assertEqual(reason, "rule_1")
+
+    def test_message_matches_ignore_rule_does_not_block_other_account(self):
+        matched, _reason = worker.message_matches_ignore_rule(
+            account={"email": "other@gmail.com"},
+            subject="Boleto Euromillones ICOVVTV09154 validado",
+            body="Consulta tu combinacion",
+            ignore_rules=[
+                {
+                    "id": "rule_1",
+                    "kind": "subject_terms_all",
+                    "account_email": "owner@gmail.com",
+                    "description_terms": ["boleto", "euromillones", "validado"],
+                    "active": True,
+                }
+            ],
+        )
+
+        self.assertFalse(matched)
+
+    def test_non_package_signature_rejects_lottery_and_linkedin_noise(self):
+        self.assertTrue(
+            worker.looks_like_non_package_message(
+                sender="Loterias <news@example.com>",
+                subject="Boleto Euromillones ICOVVTV09154 validado",
+                body="Resultado del sorteo",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
+                sender="LinkedIn <jobs-noreply@linkedin.com>",
+                subject="Job alert: nuevas vacantes",
+                body="empleo y vacantes recomendadas",
+            )
+        )
+        self.assertFalse(
+            worker.looks_like_non_package_message(
+                sender="Amazon <shipment-tracking@amazon.es>",
+                subject="Tu paquete Amazon en reparto",
+                body="Seguimiento del paquete y entrega hoy",
+            )
+        )
+
 
 class ExtractionAndAuthTests(unittest.TestCase):
     def test_extract_tracking_numbers_detects_strong_patterns(self):

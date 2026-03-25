@@ -308,6 +308,8 @@ function normalizeImapSnapshot(item, tracking, accountEmail = "") {
   const description = String(item?.description || item?.desc || "").trim();
   const location = String(item?.location || "").trim();
   const carrierName = String(item?.carrier_name || item?.carrierName || "").trim();
+  const subject = String(item?.subject || item?.email_subject || "").trim();
+  const sender = String(item?.sender || item?.email_sender || "").trim();
   const timeIso = parseIsoOrNull(item?.time_iso || item?.time || item?.event_time);
   const forcedOutForDelivery = maybeBool(item?.is_out_for_delivery ?? item?.isOutForDelivery);
   const forcedDelivered = maybeBool(item?.is_delivered ?? item?.isDelivered);
@@ -326,7 +328,9 @@ function normalizeImapSnapshot(item, tracking, accountEmail = "") {
       subStatus: subStatus || null,
       description: description || null,
       time: timeIso,
-      location: location || null
+      location: location || null,
+      subject: subject || description || null,
+      sender: sender || null
     },
     flags: {
       isOutForDelivery: !!isOutForDelivery,
@@ -914,6 +918,7 @@ function ensureOwnerShape(store, owner) {
   o.meta = o.meta && typeof o.meta === "object" ? o.meta : {};
   o.last = o.last && typeof o.last === "object" ? o.last : {};
   o.imap_accounts = Array.isArray(o.imap_accounts) ? o.imap_accounts : [];
+  o.imap_ignore_rules = ownerImapIgnoreRules(o);
   return o;
 }
 
@@ -966,6 +971,121 @@ function removeOwnerImapAccount(o, emailRaw) {
   const removed = accounts.length - next.length;
   setOwnerImapAccounts(o, next);
   return removed;
+}
+
+function normalizeIgnoreTermToken(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function extractIgnoreTerms(textRaw, limit = 4) {
+  const text = normalizeIgnoreTermToken(textRaw);
+  if (!text) return [];
+
+  const stopwords = new Set([
+    "para",
+    "desde",
+    "hasta",
+    "sobre",
+    "your",
+    "this",
+    "that",
+    "with",
+    "from",
+    "have",
+    "been",
+    "este",
+    "esta",
+    "estas",
+    "estos",
+    "como",
+    "solo",
+    "mail",
+    "email",
+    "correo",
+    "alerta",
+    "pedido",
+    "paquete",
+    "tracking",
+    "shipment",
+    "delivery",
+    "package"
+  ]);
+
+  const tokens = [];
+  for (const token of text.split(/\s+/)) {
+    if (!token || token.length < 4) continue;
+    if (stopwords.has(token)) continue;
+    if (/^\d+$/.test(token)) continue;
+    if (/\d/.test(token)) continue;
+    const letters = (token.match(/[a-z]/g) || []).length;
+    if (letters < 3) continue;
+    if (!tokens.includes(token)) tokens.push(token);
+    if (tokens.length >= limit) break;
+  }
+  return tokens;
+}
+
+function normalizeImapIgnoreRuleEntry(ruleLike) {
+  const accountEmail = String(ruleLike?.account_email || ruleLike?.accountEmail || "").trim().toLowerCase();
+  const terms = Array.isArray(ruleLike?.description_terms)
+    ? ruleLike.description_terms
+    : Array.isArray(ruleLike?.terms)
+      ? ruleLike.terms
+      : extractIgnoreTerms(ruleLike?.sample_description || ruleLike?.description || "");
+  const normalizedTerms = [...new Set(terms.map((x) => normalizeIgnoreTermToken(x)).filter(Boolean))];
+  if (!normalizedTerms.length) return null;
+  return {
+    id: String(ruleLike?.id || `ignore_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`),
+    kind: "subject_terms_all",
+    account_email: accountEmail || null,
+    description_terms: normalizedTerms,
+    sample_description: String(ruleLike?.sample_description || ruleLike?.description || "").trim() || null,
+    created_at: parseIsoOrNull(ruleLike?.created_at || ruleLike?.createdAt) || new Date().toISOString(),
+    active: maybeBool(ruleLike?.active) !== false
+  };
+}
+
+function ownerImapIgnoreRules(o) {
+  const raw = Array.isArray(o?.imap_ignore_rules) ? o.imap_ignore_rules : [];
+  const out = [];
+  const seen = new Set();
+  for (const rule of raw) {
+    const normalized = normalizeImapIgnoreRuleEntry(rule);
+    if (!normalized || !normalized.active) continue;
+    const dedupeKey = `${normalized.account_email || "*"}|${normalized.description_terms.join("|")}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function setOwnerImapIgnoreRules(o, rules) {
+  o.imap_ignore_rules = ownerImapIgnoreRules({ imap_ignore_rules: rules });
+}
+
+function upsertOwnerImapIgnoreRule(o, ruleLike) {
+  const next = normalizeImapIgnoreRuleEntry(ruleLike);
+  if (!next) return null;
+  const rules = ownerImapIgnoreRules(o);
+  const idx = rules.findIndex((rule) => (
+    (rule.account_email || null) === (next.account_email || null) &&
+    rule.description_terms.join("|") === next.description_terms.join("|")
+  ));
+  if (idx >= 0) {
+    rules[idx] = { ...rules[idx], ...next, id: rules[idx].id, created_at: rules[idx].created_at };
+    setOwnerImapIgnoreRules(o, rules);
+    return rules[idx];
+  }
+  rules.push(next);
+  setOwnerImapIgnoreRules(o, rules);
+  return next;
 }
 
 function getMeta(o) {
@@ -1026,7 +1146,9 @@ function ownerIsEmpty(o) {
   const tCount = Array.isArray(o?.trackings) ? o.trackings.length : 0;
   const mCount = o?.meta && typeof o.meta === "object" ? Object.keys(o.meta).length : 0;
   const lCount = o?.last && typeof o.last === "object" ? Object.keys(o.last).length : 0;
-  return tCount === 0 && mCount === 0 && lCount === 0;
+  const aCount = Array.isArray(o?.imap_accounts) ? o.imap_accounts.length : 0;
+  const rCount = Array.isArray(o?.imap_ignore_rules) ? o.imap_ignore_rules.length : 0;
+  return tCount === 0 && mCount === 0 && lCount === 0 && aCount === 0 && rCount === 0;
 }
 
 function resolveCarrierKey(aliasOrKey) {
@@ -1332,6 +1454,56 @@ function setTrackingDeliveredOverride(store, ownerRaw, trackingRaw, delivered) {
   };
 }
 
+function removeTrackingFromOwner(o, trackingRaw) {
+  const tracking = normalizeTracking(trackingRaw);
+  const before = ownerTrackings(o);
+  o.trackings = before.filter((x) => normalizeTracking(x) !== tracking);
+  const removedFromTrackings = before.length - o.trackings.length;
+  const removedFromMeta = deleteTrackingFromMap(o.meta, tracking);
+  const removedFromLast = deleteTrackingFromMap(o.last, tracking);
+  return {
+    tracking,
+    removed: removedFromTrackings > 0,
+    removed_count: removedFromTrackings,
+    removed_meta: removedFromMeta,
+    removed_last: removedFromLast
+  };
+}
+
+function markTrackingAsNotPackage(store, ownerRaw, trackingRaw) {
+  const owner = String(ownerRaw || "").trim().toLowerCase();
+  const tracking = normalizeTracking(trackingRaw);
+  const o = getOwner(store, owner);
+  if (!o) return { ok: false, status: 404, owner, tracking, error: "owner_not_found" };
+  if (!ownerTrackings(o).includes(tracking)) {
+    return { ok: false, status: 404, owner, tracking, error: "tracking_not_found" };
+  }
+
+  const meta = getTrackingMeta(o, tracking);
+  const one = ownerLastMap(o)?.[tracking];
+  const description = String(one?.latest?.subject || one?.latest?.description || one?.latest?.status || "").trim();
+  const terms = extractIgnoreTerms(description);
+  if (!terms.length) {
+    return { ok: false, status: 422, owner, tracking, error: "ignore_rule_terms_missing" };
+  }
+
+  const ignoreRule = upsertOwnerImapIgnoreRule(o, {
+    account_email: String(meta?.imap_account || "").trim().toLowerCase() || null,
+    description_terms: terms,
+    sample_description: description
+  });
+  const removal = removeTrackingFromOwner(o, tracking);
+
+  return {
+    ok: true,
+    status: 200,
+    owner,
+    tracking,
+    ignore_rule: ignoreRule,
+    ...removal
+  };
+}
+
 // Decide whether we should refresh now.
 // Policy:
 // - If owner has pending trackings => refresh every normalIntervalMin
@@ -1493,7 +1665,9 @@ function shortOne(one) {
         subStatus: one.latest.subStatus ?? null,
         description: one.latest.description ?? null,
         time: one.latest.time ?? null,
-        location: one.latest.location ?? null
+        location: one.latest.location ?? null,
+        subject: one.latest.subject ?? null,
+        sender: one.latest.sender ?? null
       }
       : null,
     flags: one.flags
@@ -1702,6 +1876,15 @@ app.delete("/api/owner/:owner/imap/accounts/:email", (req, res) => {
     removed_count: removed,
     count: ownerImapAccounts(o).length
   });
+});
+
+app.get("/api/owner/:owner/imap/ignore_rules", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.json({ ok: true, owner, count: 0, rules: [] });
+  const rules = ownerImapIgnoreRules(o);
+  return res.json({ ok: true, owner, count: rules.length, rules });
 });
 
 app.post("/api/owner/:owner/imap/ingest", (req, res) => {
@@ -2005,6 +2188,46 @@ app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
   return res.json(result);
 });
 
+app.post("/api/owner/:owner/tracking/:tracking/not_package", (req, res) => {
+  const owner = String(req.params.owner || "").trim().toLowerCase();
+  const tracking = String(req.params.tracking || "").trim().toUpperCase();
+  const store = loadStore();
+  const o = getOwner(store, owner);
+  if (!o) return res.status(404).json({ ok: false, owner, tracking, error: "owner_not_found" });
+
+  const source = trackingSource(o, tracking);
+  if (source !== "imap") {
+    return res.status(400).json({
+      ok: false,
+      owner,
+      tracking,
+      source,
+      error: "not_package_only_imap"
+    });
+  }
+
+  const result = markTrackingAsNotPackage(store, owner, tracking);
+  if (!result.ok) {
+    return res.status(result.status).json(result);
+  }
+
+  if (ownerIsEmpty(o)) delete store.owners[owner];
+  else store.owners[owner] = o;
+  saveStore(store);
+
+  const payload = {
+    req_id: req.reqId,
+    owner,
+    tracking,
+    account_email: result.ignore_rule?.account_email || null,
+    description_terms: result.ignore_rule?.description_terms || []
+  };
+  logAt("info", "tracking_marked_not_package", payload);
+  postHaAuditLogSafe("info", "tracking_marked_not_package", payload);
+
+  return res.json(result);
+});
+
 // Set or clear a preferred carrier for a tracking.
 // Body:
 // - { carrier: 100189 } or { carrier_alias: "gls_es" } => set preferred carrier
@@ -2097,11 +2320,7 @@ app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
     return res.json({ ok: true, owner, tracking, removed: false, removed_count: 0, reason: "owner_not_found" });
   }
 
-  const before = ownerTrackings(o);
-  o.trackings = before.filter((x) => normalizeTracking(x) !== tracking);
-  const removedFromTrackings = before.length - o.trackings.length;
-  const removedFromMeta = deleteTrackingFromMap(o.meta, tracking);
-  const removedFromLast = deleteTrackingFromMap(o.last, tracking);
+  const removal = removeTrackingFromOwner(o, tracking);
 
   if (ownerIsEmpty(o)) delete store.owners[owner];
 
@@ -2110,18 +2329,18 @@ app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
     req_id: req.reqId,
     owner,
     tracking,
-    removed_count: removedFromTrackings,
-    removed_meta: removedFromMeta,
-    removed_last: removedFromLast
+    removed_count: removal.removed_count,
+    removed_meta: removal.removed_meta,
+    removed_last: removal.removed_last
   });
   res.json({
     ok: true,
     owner,
     tracking,
-    removed: removedFromTrackings > 0,
-    removed_count: removedFromTrackings,
-    removed_meta: removedFromMeta,
-    removed_last: removedFromLast
+    removed: removal.removed,
+    removed_count: removal.removed_count,
+    removed_meta: removal.removed_meta,
+    removed_last: removal.removed_last
   });
 });
 
@@ -2386,6 +2605,8 @@ module.exports = {
   _test: {
     applyDeliveredRetentionForOwner,
     manualDeliveredAtForRetention,
-    setTrackingDeliveredOverride
+    setTrackingDeliveredOverride,
+    extractIgnoreTerms,
+    markTrackingAsNotPackage
   }
 };

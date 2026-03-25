@@ -38,6 +38,7 @@ DEFAULT_FETCH_LIMIT = 120
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_TIMEOUT_SEC = 20
 DEFAULT_DOTENV_PATH = ".env"
+DEFAULT_IGNORE_RULES_TIMEOUT_SEC = 10
 
 # Temporary code-level pause without touching IMAP account config.
 # Re-enable this account on 2026-06-24 by removing this block.
@@ -133,6 +134,19 @@ CARRIER_HINTS = [
     ("gls", "GLS"),
     ("mrw", "MRW"),
     ("ctt", "CTT"),
+]
+
+NON_PACKAGE_KEYWORDS_ANY = [
+    "euromillones",
+    "loteria",
+    "lottery",
+    "boleto",
+    "linkedin",
+    "job alert",
+    "job alerts",
+    "vacante",
+    "vacantes",
+    "empleo",
 ]
 
 
@@ -440,6 +454,59 @@ def guess_carrier(sender: str, subject: str, body: str) -> str | None:
         if hint in text:
             return carrier
     return None
+
+
+def normalize_ignore_text(value: str) -> str:
+    text = str(value or "").strip().lower()
+    text = text.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def message_matches_ignore_rule(
+    account: dict[str, Any],
+    subject: str,
+    body: str,
+    ignore_rules: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    if not ignore_rules:
+        return False, "no_ignore_rules"
+
+    account_email = str(account.get("email") or "").strip().lower()
+    normalized_subject = normalize_ignore_text(subject)
+    normalized_body = normalize_ignore_text(body)
+    haystack = f"{normalized_subject}\n{normalized_body}"
+
+    for rule in ignore_rules:
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("kind") != "subject_terms_all":
+            continue
+        if rule.get("active") is False:
+            continue
+
+        rule_account = str(rule.get("account_email") or "").strip().lower()
+        if rule_account and rule_account != account_email:
+            continue
+
+        terms = [normalize_ignore_text(term) for term in rule.get("description_terms") or []]
+        terms = [term for term in terms if term]
+        if not terms:
+            continue
+
+        if all(term in haystack for term in terms):
+            return True, str(rule.get("id") or "ignore_rule")
+
+    return False, "ignore_rule_not_matched"
+
+
+def looks_like_non_package_message(sender: str, subject: str, body: str) -> bool:
+    text = f"{sender}\n{subject}\n{body}".lower()
+    if has_shipping_context(text):
+        return False
+    if guess_carrier(sender, subject, body):
+        return False
+    return any(keyword in text for keyword in NON_PACKAGE_KEYWORDS_ANY)
 
 
 def message_passes_filters(
@@ -800,6 +867,7 @@ def process_account(
     lookback_days: int,
     fetch_limit: int,
     timeout_sec: int,
+    ignore_rules: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int, int, int, dict[str, int]]:
     client: imaplib.IMAP4_SSL | None = None
     max_seen_uid = last_uid
@@ -835,6 +903,23 @@ def process_account(
                 filtered_reasons[reason] = filtered_reasons.get(reason, 0) + 1
                 continue
 
+            ignored, ignore_reason = message_matches_ignore_rule(
+                account=account,
+                subject=subject,
+                body=body,
+                ignore_rules=ignore_rules,
+            )
+            if ignored:
+                filtered_out += 1
+                reason_key = f"matched_ignore_rule:{ignore_reason}"
+                filtered_reasons[reason_key] = filtered_reasons.get(reason_key, 0) + 1
+                continue
+
+            if looks_like_non_package_message(sender=sender, subject=subject, body=body):
+                filtered_out += 1
+                filtered_reasons["non_package_signature"] = filtered_reasons.get("non_package_signature", 0) + 1
+                continue
+
             trackings = extract_tracking_numbers(subject=subject, body=body)
             if not trackings:
                 continue
@@ -850,6 +935,8 @@ def process_account(
                     "description": description,
                     "time_iso": date_iso,
                     "account_email": account["email"],
+                    "subject": subject,
+                    "sender": sender,
                 }
                 if carrier_name:
                     item["carrier_name"] = carrier_name
@@ -900,6 +987,25 @@ def post_ingest(
     return json.loads(body.decode("utf-8", errors="replace"))
 
 
+def fetch_ignore_rules(base_url: str, owner: str, api_key: str, timeout_sec: int) -> list[dict[str, Any]]:
+    endpoint = f"{base_url.rstrip('/')}/api/owner/{quote(owner, safe='')}/imap/ignore_rules"
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    req = Request(endpoint, headers=headers, method="GET")
+    with urlopen(req, timeout=max(1, min(timeout_sec, DEFAULT_IGNORE_RULES_TIMEOUT_SEC))) as res:
+        body = res.read()
+        status_code = res.status
+
+    if status_code < 200 or status_code >= 300 or not body:
+        return []
+
+    payload = json.loads(body.decode("utf-8", errors="replace"))
+    rules = payload.get("rules")
+    return rules if isinstance(rules, list) else []
+
+
 def main() -> int:
     load_dotenv_defaults(Path(str(os.getenv("IMAP_WORKER_DOTENV_PATH") or DEFAULT_DOTENV_PATH)))
 
@@ -927,6 +1033,7 @@ def main() -> int:
 
     had_errors = False
     items_by_owner: dict[str, list[dict[str, Any]]] = {}
+    ignore_rules_by_owner: dict[str, list[dict[str, Any]]] = {}
     pending_updates: dict[str, dict[str, Any]] = {}
     failed_post_owners: set[str] = set()
     failed_accounts = 0
@@ -946,12 +1053,32 @@ def main() -> int:
         last_uid = parse_int(old_state.get("last_uid"), 0)
 
         try:
+            owner_ignore_rules = ignore_rules_by_owner.get(account["owner"])
+            if owner_ignore_rules is None:
+                try:
+                    owner_ignore_rules = fetch_ignore_rules(
+                        base_url=base_url,
+                        owner=account["owner"],
+                        api_key=api_key,
+                        timeout_sec=timeout_sec,
+                    )
+                except Exception as exc:
+                    owner_ignore_rules = []
+                    log(
+                        "warn",
+                        "imap_ignore_rules_fetch_failed",
+                        owner=account["owner"],
+                        error=str(exc),
+                    )
+                ignore_rules_by_owner[account["owner"]] = owner_ignore_rules
+
             items, max_uid, scanned, filtered_out, filtered_reasons = process_account(
                 account=account,
                 last_uid=last_uid,
                 lookback_days=lookback_days,
                 fetch_limit=fetch_limit,
                 timeout_sec=timeout_sec,
+                ignore_rules=owner_ignore_rules,
             )
             pending_updates[key] = {
                 "owner": account["owner"],

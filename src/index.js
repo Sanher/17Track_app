@@ -95,8 +95,10 @@ app.set("trust proxy", 1);
 app.use(express.json({ limit: APP_JSON_LIMIT }));
 app.use(express.static(PUBLIC_DIR));
 app.get("/ui", (_req, res) => res.sendFile(path.join(PUBLIC_DIR, "index.html")));
-app.get("/telegram/app", (_req, res) => res.redirect("/telegram/app/"));
-app.use("/telegram/app", express.static(TELEGRAM_PUBLIC_DIR));
+app.use("/telegram/app", express.static(TELEGRAM_PUBLIC_DIR, { index: false, redirect: false }));
+app.get(["/telegram/app", "/telegram/app/"], (_req, res) => {
+  res.sendFile(path.join(TELEGRAM_PUBLIC_DIR, "index.html"));
+});
 
 function extractRequestApiKey(req) {
   const byHeader = String(req.get("x-api-key") || "").trim();

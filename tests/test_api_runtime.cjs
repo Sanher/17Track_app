@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const { EventEmitter } = require("node:events");
 
 const { _test } = require("../src/index.js");
 
@@ -238,4 +239,117 @@ test("telegram listing excludes pre-shipment and foreign owners", () => {
   );
   assert.equal(result.items[0].status, "in_transit");
   assert.equal(result.items[1].status, "delivered");
+});
+
+test("manual imap refresh rejects missing worker script", () => {
+  const state = {
+    running: false,
+    pid: null,
+    last_started_at: null,
+    last_finished_at: null,
+    last_exit_code: null,
+    last_error: null,
+    last_trigger: null
+  };
+
+  const result = _test.triggerManualImapRefresh(
+    { source: "test" },
+    {
+      state,
+      scriptPath: "/missing/imap_ingest_worker.py",
+      pathExists: () => false,
+      logFn: () => {},
+      auditFn: () => {}
+    }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "imap_worker_script_missing");
+  assert.equal(state.last_error, "imap_worker_script_missing");
+});
+
+test("manual imap refresh reports already running without spawning", () => {
+  const state = {
+    running: true,
+    pid: 4321,
+    last_started_at: "2026-03-25T10:00:00Z",
+    last_finished_at: null,
+    last_exit_code: null,
+    last_error: null,
+    last_trigger: { source: "existing" }
+  };
+  let spawnCalled = false;
+
+  const result = _test.triggerManualImapRefresh(
+    { source: "test" },
+    {
+      state,
+      pathExists: () => true,
+      spawnImpl: () => {
+        spawnCalled = true;
+      },
+      logFn: () => {},
+      auditFn: () => {}
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.started, false);
+  assert.equal(result.reason, "already_running");
+  assert.equal(spawnCalled, false);
+});
+
+test("manual imap refresh updates state on successful close", async () => {
+  const state = {
+    running: false,
+    pid: null,
+    last_started_at: null,
+    last_finished_at: null,
+    last_exit_code: null,
+    last_error: null,
+    last_trigger: null
+  };
+  const lines = [];
+
+  function makeStream() {
+    const stream = new EventEmitter();
+    stream.on = stream.on.bind(stream);
+    return stream;
+  }
+
+  const child = new EventEmitter();
+  child.pid = 9876;
+  child.stdout = makeStream();
+  child.stderr = makeStream();
+
+  const result = _test.triggerManualImapRefresh(
+    { source: "telegram_miniapp", telegram_user_id: 123 },
+    {
+      state,
+      scriptPath: "/tmp/imap_ingest_worker.py",
+      pathExists: () => true,
+      spawnImpl: () => child,
+      logFn: (_level, _msg, extra = {}) => {
+        if (extra.line) lines.push(extra.line);
+      },
+      auditFn: () => {}
+    }
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.started, true);
+  assert.equal(state.running, true);
+  assert.equal(state.pid, 9876);
+
+  child.stdout.emit("data", Buffer.from("linea uno\nlinea dos\n"));
+  child.stderr.emit("data", Buffer.from("warning uno\n"));
+  child.emit("close", 0);
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(state.running, false);
+  assert.equal(state.pid, null);
+  assert.equal(state.last_exit_code, 0);
+  assert.equal(state.last_error, null);
+  assert.deepEqual(lines, ["linea uno", "linea dos", "warning uno"]);
 });

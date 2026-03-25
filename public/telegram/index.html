@@ -14,43 +14,64 @@
       <p id="userMeta" class="hero-copy">Conectando...</p>
     </header>
 
-    <section class="panel filters">
-      <label class="field">
-        <span>Estado</span>
-        <select id="statusFilter">
-          <option value="">Todos</option>
-          <option value="in_transit">Enviado</option>
-          <option value="out_for_delivery">En reparto</option>
-          <option value="delivered">Entregado</option>
-        </select>
-      </label>
-
-      <label class="field">
-        <span>Courier</span>
-        <select id="courierFilter">
-          <option value="">Todos</option>
-        </select>
-      </label>
-
-      <label class="field field-grow">
-        <span>Alias</span>
-        <input id="aliasFilter" type="search" autocomplete="off" placeholder="Filtrar por alias">
-      </label>
-
-      <label class="field">
-        <span>Orden</span>
-        <select id="sortFilter">
-          <option value="status">Estado</option>
-          <option value="recent">Mas recientes</option>
-          <option value="oldest">Mas antiguos</option>
-        </select>
-      </label>
-
-      <button id="refreshButton" class="primary-button" type="button">Actualizar</button>
+    <section id="lockedPanel" class="panel locked-panel hidden">
+      <p class="locked-title">Acceso restringido</p>
+      <p id="lockedMessage" class="locked-message">
+        Validando sesion de Telegram...
+      </p>
     </section>
 
-    <section id="statusBar" class="panel status-bar hidden"></section>
-    <main id="listRoot" class="list-root"></main>
+    <div id="appRoot" class="hidden">
+      <section class="panel controls-panel">
+        <div class="controls-topline">
+          <p class="controls-copy">Vista compacta de paquetes ya enviados.</p>
+          <div class="controls-actions">
+            <button id="refreshMailButton" class="soft-button" type="button">Refrescar correo</button>
+            <button id="refreshButton" class="primary-button" type="button">Actualizar</button>
+          </div>
+        </div>
+
+        <details class="filters-details">
+          <summary>Filtros y orden</summary>
+
+          <div class="filters">
+            <label class="field">
+              <span>Estado</span>
+              <select id="statusFilter">
+                <option value="">Todos</option>
+                <option value="in_transit">Enviado</option>
+                <option value="out_for_delivery">En reparto</option>
+                <option value="delivered">Entregado</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Courier</span>
+              <select id="courierFilter">
+                <option value="">Todos</option>
+              </select>
+            </label>
+
+            <label class="field field-grow">
+              <span>Alias</span>
+              <input id="aliasFilter" type="search" autocomplete="off" placeholder="Filtrar por alias">
+            </label>
+
+            <label class="field">
+              <span>Orden</span>
+              <select id="sortFilter">
+                <option value="status">Estado</option>
+                <option value="recent">Mas recientes</option>
+                <option value="oldest">Mas antiguos</option>
+              </select>
+            </label>
+          </div>
+        </details>
+      </section>
+
+      <section id="statusBar" class="panel status-bar hidden"></section>
+      <main id="listRoot" class="list-root"></main>
+    </div>
   </div>
 
   <template id="itemTemplate">

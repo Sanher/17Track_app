@@ -319,6 +319,15 @@ class ExtractionAndAuthTests(unittest.TestCase):
         self.assertTrue(flags["spf_pass"])
         self.assertFalse(flags["dmarc_pass"])
 
+    def test_guess_carrier_does_not_prefer_generic_correos_from_body(self):
+        carrier = worker.guess_carrier(
+            sender="GLS <tracking@gls.com>",
+            subject="Tu paquete GLS esta en camino",
+            body="Si no quieres recibir mas correos, actualiza tus preferencias",
+        )
+
+        self.assertEqual(carrier, "GLS")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

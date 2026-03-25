@@ -1,4 +1,5 @@
 const express = require("express");
+const { spawn } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -32,6 +33,8 @@ const TELEGRAM_PUBLIC_BASE_URL = String(process.env.TELEGRAM_PUBLIC_BASE_URL || 
 const TELEGRAM_INIT_DATA_MAX_AGE_SEC = Number(process.env.TELEGRAM_INIT_DATA_MAX_AGE_SEC || 3600);
 const TELEGRAM_SESSION_TTL_SEC = Number(process.env.TELEGRAM_SESSION_TTL_SEC || 12 * 60 * 60);
 const TELEGRAM_SESSION_COOKIE = "tg_paquetes_session";
+const APP_ROOT_DIR = path.join(__dirname, "..");
+const IMAP_WORKER_SCRIPT = path.join(APP_ROOT_DIR, "scripts", "imap_ingest_worker.py");
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -567,6 +570,29 @@ app.get("/api/telegram/trackings", (req, res) => {
   });
 });
 
+app.get("/api/telegram/imap/status", (req, res) => {
+  return res.json({
+    ok: true,
+    running: imapManualRefreshState.running,
+    pid: imapManualRefreshState.pid,
+    last_started_at: imapManualRefreshState.last_started_at,
+    last_finished_at: imapManualRefreshState.last_finished_at,
+    last_exit_code: imapManualRefreshState.last_exit_code,
+    last_error: imapManualRefreshState.last_error
+  });
+});
+
+app.post("/api/telegram/imap/refresh", (req, res) => {
+  const result = triggerManualImapRefresh({
+    source: "telegram_miniapp",
+    telegram_user_id: req.telegramSession.telegram_user_id,
+    owners: req.telegramSession.owners
+  });
+
+  const status = result.ok ? 200 : 503;
+  return res.status(status).json(result);
+});
+
 app.post("/api/telegram/tracking/:owner/:tracking/delivered", (req, res) => {
   const owner = normalizeTelegramOwner(req.params.owner);
   const tracking = normalizeTracking(req.params.tracking);
@@ -949,6 +975,16 @@ const bgState = {
   lastRunAt: null,
   lastError: null,
   lastSummary: null
+};
+
+const imapManualRefreshState = {
+  running: false,
+  pid: null,
+  last_started_at: null,
+  last_finished_at: null,
+  last_exit_code: null,
+  last_error: null,
+  last_trigger: null
 };
 
 function isPositiveNumber(n) {
@@ -1733,6 +1769,128 @@ function listTelegramTrackings(store, allowedOwners, filters = {}) {
   return {
     items: visible,
     couriers
+  };
+}
+
+function splitLogLines(raw) {
+  return String(raw || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+// Manual mini-app refresh reuses the same IMAP worker process as the scheduled
+// path so parsing, filters and ingest behavior stay identical in both flows.
+function triggerManualImapRefresh(trigger = {}, deps = {}) {
+  const state = deps.state || imapManualRefreshState;
+  const scriptPath = deps.scriptPath || IMAP_WORKER_SCRIPT;
+  const pathExists = deps.pathExists || fs.existsSync;
+  const spawnImpl = deps.spawnImpl || spawn;
+  const appRootDir = deps.appRootDir || APP_ROOT_DIR;
+  const env = deps.env || process.env;
+  const logFn = deps.logFn || logAt;
+  const auditFn = deps.auditFn || postHaAuditLogSafe;
+
+  if (state.running) {
+    auditFn("info", "imap_manual_refresh_already_running", {
+      trigger_source: trigger?.source || null,
+      telegram_user_id: trigger?.telegram_user_id || null
+    });
+    return {
+      ok: true,
+      started: false,
+      reason: "already_running",
+      message: "Ya hay un refresco de correo en curso. Puede tardar unos momentos.",
+      state: { ...state }
+    };
+  }
+
+  if (!pathExists(scriptPath)) {
+    const error = "imap_worker_script_missing";
+    state.last_error = error;
+    return {
+      ok: false,
+      started: false,
+      error,
+      message: "No se encontró el worker IMAP para lanzar el refresco."
+    };
+  }
+
+  const child = spawnImpl("python3", [scriptPath], {
+    cwd: appRootDir,
+    env: { ...env },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  state.running = true;
+  state.pid = child.pid || null;
+  state.last_started_at = new Date().toISOString();
+  state.last_finished_at = null;
+  state.last_exit_code = null;
+  state.last_error = null;
+  state.last_trigger = trigger || null;
+
+  logFn("info", "imap_manual_refresh_started", {
+    pid: child.pid || null,
+    trigger_source: trigger?.source || null,
+    telegram_user_id: trigger?.telegram_user_id || null
+  });
+  auditFn("info", "imap_manual_refresh_started", {
+    pid: child.pid || null,
+    trigger_source: trigger?.source || null,
+    telegram_user_id: trigger?.telegram_user_id || null
+  });
+
+  child.stdout.on("data", (chunk) => {
+    for (const line of splitLogLines(chunk)) {
+      logFn("info", "imap_manual_refresh_stdout", { line });
+    }
+  });
+
+  child.stderr.on("data", (chunk) => {
+    for (const line of splitLogLines(chunk)) {
+      logFn("warn", "imap_manual_refresh_stderr", { line });
+    }
+  });
+
+  child.on("error", (error) => {
+    state.running = false;
+    state.pid = null;
+    state.last_finished_at = new Date().toISOString();
+    state.last_error = String(error.message || error);
+    logFn("error", "imap_manual_refresh_failed_to_start", {
+      error: state.last_error
+    });
+    auditFn("error", "imap_manual_refresh_failed_to_start", {
+      error: state.last_error
+    });
+  });
+
+  child.on("close", (code) => {
+    state.running = false;
+    state.pid = null;
+    state.last_finished_at = new Date().toISOString();
+    state.last_exit_code = code;
+    state.last_error = code === 0 ? null : `imap_manual_refresh_exit_${code}`;
+
+    const level = code === 0 ? "info" : "warn";
+    logFn(level, "imap_manual_refresh_finished", {
+      exit_code: code,
+      trigger_source: trigger?.source || null,
+      telegram_user_id: trigger?.telegram_user_id || null
+    });
+    auditFn(level, "imap_manual_refresh_finished", {
+      exit_code: code,
+      trigger_source: trigger?.source || null,
+      telegram_user_id: trigger?.telegram_user_id || null
+    });
+  });
+
+  return {
+    ok: true,
+    started: true,
+    message: "Refresco de correo lanzado. Puede tardar unos momentos en reflejarse.",
+    state: { ...state }
   };
 }
 
@@ -3138,6 +3296,8 @@ module.exports = {
     createTelegramSessionToken,
     verifyTelegramSessionToken,
     trackingLifecycleState,
-    listTelegramTrackings
+    listTelegramTrackings,
+    triggerManualImapRefresh,
+    splitLogLines
   }
 };

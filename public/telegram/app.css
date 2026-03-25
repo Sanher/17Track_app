@@ -82,9 +82,77 @@ body {
   padding: 14px;
 }
 
+.controls-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.controls-topline {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+}
+
+.controls-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.controls-copy {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.locked-panel {
+  text-align: left;
+}
+
+.locked-title {
+  margin: 0 0 10px;
+  color: var(--accent-2);
+  font-size: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.locked-message {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .filters {
   display: grid;
   gap: 12px;
+}
+
+.filters-details {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.34);
+  padding: 10px 12px 12px;
+}
+
+.filters-details summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+}
+
+.filters-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.filters-details[open] summary {
+  margin-bottom: 12px;
 }
 
 .field {
@@ -103,7 +171,8 @@ body {
 
 .field input,
 .field select,
-.primary-button {
+.primary-button,
+.soft-button {
   min-height: 46px;
   border-radius: var(--radius-md);
   border: 1px solid rgba(24, 34, 32, 0.15);
@@ -127,6 +196,13 @@ body {
   font-weight: 700;
   color: #fffaf5;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+.soft-button {
+  padding: 0 16px;
+  font-weight: 700;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .status-bar {
@@ -234,6 +310,10 @@ body {
 
   .filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
+
+  .controls-topline {
     align-items: end;
   }
 

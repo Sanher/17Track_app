@@ -1,16 +1,21 @@
 const state = {
   me: null,
   items: [],
-  couriers: []
+  couriers: [],
+  refreshPollId: null
 };
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
 
 const userMeta = document.getElementById("userMeta");
+const appRoot = document.getElementById("appRoot");
+const lockedPanel = document.getElementById("lockedPanel");
+const lockedMessage = document.getElementById("lockedMessage");
 const statusBar = document.getElementById("statusBar");
 const listRoot = document.getElementById("listRoot");
 const itemTemplate = document.getElementById("itemTemplate");
 const refreshButton = document.getElementById("refreshButton");
+const refreshMailButton = document.getElementById("refreshMailButton");
 const statusFilter = document.getElementById("statusFilter");
 const courierFilter = document.getElementById("courierFilter");
 const aliasFilter = document.getElementById("aliasFilter");
@@ -25,6 +30,22 @@ function setStatus(message, isError = false) {
   statusBar.textContent = message;
   statusBar.classList.remove("hidden");
   statusBar.style.color = isError ? "#8c3112" : "";
+}
+
+function setAccessState(isAuthorized, message = "") {
+  appRoot.classList.toggle("hidden", !isAuthorized);
+  lockedPanel.classList.toggle("hidden", isAuthorized);
+  if (!isAuthorized) {
+    lockedMessage.textContent = message || "Acceso no disponible.";
+    listRoot.innerHTML = "";
+    state.items = [];
+    state.couriers = [];
+  }
+}
+
+function setMailRefreshBusy(isBusy) {
+  refreshMailButton.disabled = isBusy;
+  refreshMailButton.textContent = isBusy ? "Refrescando..." : "Refrescar correo";
 }
 
 function escapeHtml(value) {
@@ -96,6 +117,41 @@ async function loadTrackings() {
   renderItems();
 }
 
+async function loadRefreshStatus() {
+  return apiFetch("/api/telegram/imap/status");
+}
+
+function stopRefreshPolling() {
+  if (state.refreshPollId) {
+    window.clearInterval(state.refreshPollId);
+    state.refreshPollId = null;
+  }
+}
+
+function startRefreshPolling() {
+  stopRefreshPolling();
+  state.refreshPollId = window.setInterval(async () => {
+    try {
+      const status = await loadRefreshStatus();
+      if (status.running) return;
+
+      stopRefreshPolling();
+      setMailRefreshBusy(false);
+      if (status.last_exit_code === 0 || status.last_exit_code === null) {
+        setStatus("Refresco de correo completado. Actualizando paquetes...");
+        await loadTrackings();
+        setStatus("Paquetes actualizados.");
+      } else {
+        setStatus("El refresco de correo terminó con error. Revisa los logs del add-on.", true);
+      }
+    } catch (error) {
+      stopRefreshPolling();
+      setMailRefreshBusy(false);
+      setStatus(`No se pudo comprobar el refresco: ${error.message}`, true);
+    }
+  }, 4000);
+}
+
 function renderCourierOptions() {
   const current = courierFilter.value;
   courierFilter.innerHTML = `<option value="">Todos</option>${state.couriers
@@ -152,22 +208,46 @@ async function bootstrap() {
     tg.expand();
   }
 
-  setStatus("Cargando mini app...");
+  setAccessState(false, "Validando sesion de Telegram...");
   try {
     state.me = await ensureTelegramSession();
+    setAccessState(true);
     userMeta.textContent = `Acceso para ${state.me.display_name} · owners: ${(state.me.owners || []).join(", ")}`;
+    setStatus("Cargando mini app...");
     await loadTrackings();
     setStatus("");
   } catch (error) {
+    setAccessState(false, tg
+      ? `No se pudo abrir la mini app: ${error.message}`
+      : "Esta vista debe abrirse desde Telegram."
+    );
     const message = tg
       ? `No se pudo abrir la mini app: ${error.message}`
       : "Esta vista debe abrirse desde Telegram o con una sesion ya iniciada.";
+    userMeta.textContent = "Acceso restringido";
     setStatus(message, true);
   }
 }
 
 refreshButton.addEventListener("click", () => {
   loadTrackings().catch((error) => setStatus(`No se pudo actualizar: ${error.message}`, true));
+});
+
+refreshMailButton.addEventListener("click", async () => {
+  setMailRefreshBusy(true);
+  setStatus("Lanzando refresco de correo. Puede tardar unos momentos...");
+  try {
+    const result = await apiFetch("/api/telegram/imap/refresh", { method: "POST" });
+    setStatus(result.message || "Refresco de correo lanzado. Puede tardar unos momentos.");
+    if (result.started === false && result.reason === "already_running") {
+      startRefreshPolling();
+      return;
+    }
+    startRefreshPolling();
+  } catch (error) {
+    setMailRefreshBusy(false);
+    setStatus(`No se pudo lanzar el refresco: ${error.message}`, true);
+  }
 });
 
 for (const control of [statusFilter, courierFilter, sortFilter]) {

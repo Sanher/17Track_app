@@ -449,9 +449,22 @@ def classify_status(subject: str, body: str) -> tuple[str, str]:
 
 
 def guess_carrier(sender: str, subject: str, body: str) -> str | None:
-    text = f"{sender}\n{subject}\n{body}".lower()
+    sender_text = str(sender or "").lower()
+    subject_text = str(subject or "").lower()
+    body_text = str(body or "").lower()
+
+    # Prefer sender and subject first. Looking through the full HTML body is too
+    # noisy and was biasing many messages to "Correos" on generic footers.
     for hint, carrier in CARRIER_HINTS:
-        if hint in text:
+        if hint in sender_text or hint in subject_text:
+            return carrier
+
+    # Keep a softer body fallback for obvious carriers, but avoid "correos"
+    # here because it is too easy to hit in unrelated content.
+    for hint, carrier in CARRIER_HINTS:
+        if hint == "correos":
+            continue
+        if hint in body_text:
             return carrier
     return None
 

@@ -1,4 +1,6 @@
 const express = require("express");
+const crypto = require("crypto");
+const fs = require("fs");
 const path = require("path");
 const { readJson, writeJson, DATA_DIR } = require("./storage");
 const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./track17");
@@ -20,6 +22,16 @@ const HA_AUDIT_LOG_LEVEL = String(process.env.HA_AUDIT_LOG_LEVEL || "info").trim
 const HA_AUDIT_LOG_NAME = String(process.env.HA_AUDIT_LOG_NAME || "Paquetes App").trim();
 const HA_AUDIT_LOG_ENTITY_ID = String(process.env.HA_AUDIT_LOG_ENTITY_ID || "").trim();
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
+const TELEGRAM_PUBLIC_DIR = path.join(PUBLIC_DIR, "telegram");
+const TELEGRAM_BOT_TOKEN = String(process.env.TELEGRAM_BOT_TOKEN || "").trim();
+const TELEGRAM_SESSION_SECRET = String(
+  process.env.TELEGRAM_SESSION_SECRET || TELEGRAM_BOT_TOKEN || ""
+).trim();
+const TELEGRAM_ACCESS_FILE = String(process.env.TELEGRAM_ACCESS_FILE || "").trim();
+const TELEGRAM_PUBLIC_BASE_URL = String(process.env.TELEGRAM_PUBLIC_BASE_URL || "").trim().replace(/\/$/, "");
+const TELEGRAM_INIT_DATA_MAX_AGE_SEC = Number(process.env.TELEGRAM_INIT_DATA_MAX_AGE_SEC || 3600);
+const TELEGRAM_SESSION_TTL_SEC = Number(process.env.TELEGRAM_SESSION_TTL_SEC || 12 * 60 * 60);
+const TELEGRAM_SESSION_COOKIE = "tg_paquetes_session";
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -78,10 +90,13 @@ function saveStore(store) { writeJson(STORE_FILE, store); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const app = express();
+app.set("trust proxy", 1);
 
 app.use(express.json({ limit: APP_JSON_LIMIT }));
 app.use(express.static(PUBLIC_DIR));
 app.get("/ui", (_req, res) => res.sendFile(path.join(PUBLIC_DIR, "index.html")));
+app.get("/telegram/app", (_req, res) => res.redirect("/telegram/app/"));
+app.use("/telegram/app", express.static(TELEGRAM_PUBLIC_DIR));
 
 function extractRequestApiKey(req) {
   const byHeader = String(req.get("x-api-key") || "").trim();
@@ -159,6 +174,251 @@ function logAt(level, message, extra = {}) {
   else console.log(line);
 }
 
+function hasTelegramMiniAppConfig() {
+  return !!(TELEGRAM_BOT_TOKEN && TELEGRAM_SESSION_SECRET && TELEGRAM_ACCESS_FILE);
+}
+
+function normalizeTelegramOwner(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeTelegramAccessEntry(entry) {
+  const telegramUserId = Number(entry?.telegram_user_id ?? entry?.telegramUserId ?? entry?.user_id ?? entry?.userId);
+  if (!Number.isFinite(telegramUserId) || telegramUserId <= 0) return null;
+
+  const ownersRaw = Array.isArray(entry?.owners) ? entry.owners : [entry?.owner];
+  const owners = [...new Set(ownersRaw.map((value) => normalizeTelegramOwner(value)).filter(Boolean))];
+  if (!owners.length) return null;
+
+  const defaultChatId = String(entry?.default_chat_id ?? entry?.defaultChatId ?? entry?.telegram_chat_id ?? "").trim() || null;
+  return {
+    telegram_user_id: telegramUserId,
+    default_chat_id: defaultChatId,
+    owners,
+    label: String(entry?.label || entry?.name || "").trim() || null,
+    active: maybeBool(entry?.active) !== false
+  };
+}
+
+function loadTelegramAccessEntries() {
+  if (!TELEGRAM_ACCESS_FILE) return [];
+  try {
+    if (!fs.existsSync(TELEGRAM_ACCESS_FILE)) return [];
+    const raw = fs.readFileSync(TELEGRAM_ACCESS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed) ? parsed : [];
+    return items
+      .map((entry) => normalizeTelegramAccessEntry(entry))
+      .filter((entry) => entry && entry.active);
+  } catch (e) {
+    logAt("error", "telegram_access_file_invalid", {
+      file: TELEGRAM_ACCESS_FILE,
+      error: String(e.message || e)
+    });
+    return [];
+  }
+}
+
+function telegramAccessForUserId(userIdRaw) {
+  const userId = Number(userIdRaw);
+  if (!Number.isFinite(userId) || userId <= 0) return null;
+  return loadTelegramAccessEntries().find((entry) => entry.telegram_user_id === userId) || null;
+}
+
+function safeCompareHex(a, b) {
+  const left = Buffer.from(String(a || ""), "hex");
+  const right = Buffer.from(String(b || ""), "hex");
+  if (!left.length || !right.length || left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function parseTelegramInitData(initDataRaw, opts = {}) {
+  const initData = String(initDataRaw || "").trim();
+  const botToken = String(opts.botToken || TELEGRAM_BOT_TOKEN || "").trim();
+  const maxAgeSec = Number.isFinite(Number(opts.maxAgeSec)) ? Number(opts.maxAgeSec) : TELEGRAM_INIT_DATA_MAX_AGE_SEC;
+  if (!initData) return { ok: false, error: "init_data_missing" };
+  if (!botToken) return { ok: false, error: "telegram_bot_token_missing" };
+
+  const params = new URLSearchParams(initData);
+  const hash = String(params.get("hash") || "").trim().toLowerCase();
+  if (!hash) return { ok: false, error: "hash_missing" };
+
+  const authDate = Number(params.get("auth_date") || 0);
+  if (!Number.isFinite(authDate) || authDate <= 0) return { ok: false, error: "auth_date_invalid" };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (Number.isFinite(maxAgeSec) && maxAgeSec > 0 && nowSec - authDate > maxAgeSec) {
+    return { ok: false, error: "init_data_expired" };
+  }
+
+  const entries = [];
+  for (const [key, value] of params.entries()) {
+    if (key === "hash") continue;
+    entries.push([key, value]);
+  }
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  const dataCheckString = entries.map(([key, value]) => `${key}=${value}`).join("\n");
+  const secret = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
+  const expectedHash = crypto.createHmac("sha256", secret).update(dataCheckString).digest("hex");
+  if (!safeCompareHex(hash, expectedHash)) return { ok: false, error: "hash_mismatch" };
+
+  let user = null;
+  const userRaw = params.get("user");
+  if (userRaw) {
+    try {
+      user = JSON.parse(userRaw);
+    } catch (_e) {
+      return { ok: false, error: "user_payload_invalid" };
+    }
+  }
+  const userId = Number(user?.id);
+  if (!Number.isFinite(userId) || userId <= 0) return { ok: false, error: "user_id_missing" };
+
+  return {
+    ok: true,
+    auth_date: authDate,
+    user,
+    user_id: userId,
+    query_id: String(params.get("query_id") || "").trim() || null,
+    chat_type: String(params.get("chat_type") || "").trim() || null,
+    start_param: String(params.get("start_param") || "").trim() || null
+  };
+}
+
+function base64UrlEncode(value) {
+  return Buffer.from(String(value || ""), "utf8").toString("base64url");
+}
+
+function base64UrlDecode(value) {
+  return Buffer.from(String(value || ""), "base64url").toString("utf8");
+}
+
+function createTelegramSessionToken(payload, secret = TELEGRAM_SESSION_SECRET) {
+  const body = base64UrlEncode(JSON.stringify(payload || {}));
+  const sig = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function verifyTelegramSessionToken(token, secret = TELEGRAM_SESSION_SECRET) {
+  const raw = String(token || "").trim();
+  const [body, signature] = raw.split(".");
+  if (!body || !signature || !secret) return { ok: false, error: "session_invalid" };
+
+  const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+  const left = Buffer.from(signature, "utf8");
+  const right = Buffer.from(expected, "utf8");
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) {
+    return { ok: false, error: "session_signature_invalid" };
+  }
+
+  try {
+    const payload = JSON.parse(base64UrlDecode(body));
+    const nowSec = Math.floor(Date.now() / 1000);
+    const exp = Number(payload?.exp || 0);
+    if (!Number.isFinite(exp) || exp <= nowSec) return { ok: false, error: "session_expired" };
+    return { ok: true, payload };
+  } catch (_e) {
+    return { ok: false, error: "session_payload_invalid" };
+  }
+}
+
+function parseCookieHeader(req) {
+  const raw = String(req.get("cookie") || "");
+  const out = {};
+  for (const piece of raw.split(/;\s*/)) {
+    if (!piece) continue;
+    const idx = piece.indexOf("=");
+    if (idx <= 0) continue;
+    const key = piece.slice(0, idx).trim();
+    const value = piece.slice(idx + 1).trim();
+    if (!key) continue;
+    out[key] = decodeURIComponent(value);
+  }
+  return out;
+}
+
+function appendSetCookie(res, cookieValue) {
+  const current = res.getHeader("Set-Cookie");
+  if (!current) {
+    res.setHeader("Set-Cookie", cookieValue);
+    return;
+  }
+  const next = Array.isArray(current) ? [...current, cookieValue] : [current, cookieValue];
+  res.setHeader("Set-Cookie", next);
+}
+
+function requestWantsSecureCookie(req) {
+  if (req.secure) return true;
+  const forwardedProto = String(req.get("x-forwarded-proto") || "").trim().toLowerCase();
+  return forwardedProto === "https";
+}
+
+function setTelegramSessionCookie(req, res, token) {
+  const parts = [
+    `${TELEGRAM_SESSION_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    `Max-Age=${Math.max(60, TELEGRAM_SESSION_TTL_SEC)}`
+  ];
+  if (requestWantsSecureCookie(req)) parts.push("Secure");
+  appendSetCookie(res, parts.join("; "));
+}
+
+function clearTelegramSessionCookie(req, res) {
+  const parts = [
+    `${TELEGRAM_SESSION_COOKIE}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Lax",
+    "Max-Age=0"
+  ];
+  if (requestWantsSecureCookie(req)) parts.push("Secure");
+  appendSetCookie(res, parts.join("; "));
+}
+
+function readTelegramSession(req) {
+  const cookies = parseCookieHeader(req);
+  const token = String(cookies[TELEGRAM_SESSION_COOKIE] || "").trim();
+  if (!token) return { ok: false, error: "session_missing" };
+  return verifyTelegramSessionToken(token);
+}
+
+function isTelegramPublicRequest(req) {
+  const pathname = String(req.path || "");
+  return (
+    pathname === "/telegram/app" ||
+    pathname.startsWith("/telegram/app/") ||
+    pathname.startsWith("/api/telegram/") ||
+    pathname === "/api/telegram/session" ||
+    pathname === "/api/telegram/logout"
+  );
+}
+
+function requireTelegramSession(req, res, next) {
+  const session = readTelegramSession(req);
+  if (!session.ok) {
+    return res.status(401).json({ ok: false, error: session.error || "telegram_session_invalid" });
+  }
+
+  const payload = session.payload || {};
+  const access = telegramAccessForUserId(payload.telegram_user_id);
+  if (!access) {
+    clearTelegramSessionCookie(req, res);
+    return res.status(403).json({ ok: false, error: "telegram_user_not_allowed" });
+  }
+
+  req.telegramSession = {
+    telegram_user_id: payload.telegram_user_id,
+    display_name: payload.display_name || "Telegram",
+    username: payload.username || null,
+    owners: access.owners,
+    default_chat_id: access.default_chat_id || null,
+    label: access.label || null
+  };
+  next();
+}
+
 app.use((req, res, next) => {
   const started = Date.now();
   const reqId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -180,7 +440,7 @@ app.use((req, res, next) => {
 // Optional API protection: when APP_API_KEY is set, every endpoint except health/build requires it.
 app.use((req, res, next) => {
   if (!APP_API_KEY) return next();
-  if (req.path === "/health" || req.path === "/api/_build") return next();
+  if (req.path === "/health" || req.path === "/api/_build" || isTelegramPublicRequest(req)) return next();
 
   const provided = extractRequestApiKey(req);
   if (provided && provided === APP_API_KEY) return next();
@@ -198,6 +458,139 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/api/_build", (_req, res) => res.json({ ok: true, build: APP_VERSION, has_trackings: true }));
+
+// La mini app de Telegram valida initData en backend y crea una sesión corta
+// firmada propia; no comparte auth con Home Assistant ni con APP_API_KEY.
+app.post("/api/telegram/session", express.json({ limit: "32kb" }), (req, res) => {
+  if (!hasTelegramMiniAppConfig()) {
+    return res.status(503).json({
+      ok: false,
+      error: "telegram_miniapp_not_configured"
+    });
+  }
+
+  const initData = String(req.body?.init_data || req.body?.initData || "").trim();
+  const parsed = parseTelegramInitData(initData);
+  if (!parsed.ok) {
+    const payload = {
+      req_id: req.reqId,
+      error: parsed.error
+    };
+    logAt("warn", "telegram_session_rejected", payload);
+    postHaAuditLogSafe("warn", "telegram_session_rejected", payload);
+    return res.status(401).json({ ok: false, error: parsed.error });
+  }
+
+  const access = telegramAccessForUserId(parsed.user_id);
+  if (!access) {
+    const payload = {
+      req_id: req.reqId,
+      telegram_user_id: parsed.user_id,
+      error: "telegram_user_not_allowed"
+    };
+    logAt("warn", "telegram_session_user_denied", payload);
+    postHaAuditLogSafe("warn", "telegram_session_user_denied", payload);
+    return res.status(403).json({ ok: false, error: "telegram_user_not_allowed" });
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const token = createTelegramSessionToken({
+    telegram_user_id: parsed.user_id,
+    owners: access.owners,
+    username: String(parsed.user?.username || "").trim() || null,
+    display_name: telegramDisplayNameFromUser(parsed.user),
+    iat: nowSec,
+    exp: nowSec + Math.max(300, TELEGRAM_SESSION_TTL_SEC)
+  });
+  setTelegramSessionCookie(req, res, token);
+
+  const response = {
+    ok: true,
+    telegram_user_id: parsed.user_id,
+    display_name: telegramDisplayNameFromUser(parsed.user),
+    owners: access.owners,
+    public_base_url: TELEGRAM_PUBLIC_BASE_URL || null
+  };
+  logAt("info", "telegram_session_created", {
+    req_id: req.reqId,
+    telegram_user_id: parsed.user_id,
+    owners: access.owners
+  });
+  return res.json(response);
+});
+
+app.post("/api/telegram/logout", (req, res) => {
+  clearTelegramSessionCookie(req, res);
+  return res.json({ ok: true });
+});
+
+app.use("/api/telegram", (req, res, next) => {
+  if (req.path === "/session" || req.path === "/logout") return next();
+  return requireTelegramSession(req, res, next);
+});
+
+app.get("/api/telegram/me", (req, res) => {
+  return res.json({
+    ok: true,
+    telegram_user_id: req.telegramSession.telegram_user_id,
+    display_name: req.telegramSession.display_name,
+    username: req.telegramSession.username,
+    owners: req.telegramSession.owners,
+    default_chat_id: req.telegramSession.default_chat_id,
+    public_base_url: TELEGRAM_PUBLIC_BASE_URL || null
+  });
+});
+
+app.get("/api/telegram/trackings", (req, res) => {
+  const store = loadStore();
+  let removed = 0;
+  for (const owner of req.telegramSession.owners) {
+    removed += applyDeliveredRetentionForOwner(store, owner, new Date()).removed;
+  }
+  if (removed > 0) saveStore(store);
+
+  const result = listTelegramTrackings(store, req.telegramSession.owners, {
+    status: req.query?.status,
+    courier: req.query?.courier,
+    alias: req.query?.alias,
+    sort: req.query?.sort
+  });
+
+  return res.json({
+    ok: true,
+    owners: req.telegramSession.owners,
+    count: result.items.length,
+    couriers: result.couriers,
+    items: result.items
+  });
+});
+
+app.post("/api/telegram/tracking/:owner/:tracking/delivered", (req, res) => {
+  const owner = normalizeTelegramOwner(req.params.owner);
+  const tracking = normalizeTracking(req.params.tracking);
+  if (!req.telegramSession.owners.includes(owner)) {
+    return res.status(403).json({ ok: false, error: "telegram_owner_not_allowed" });
+  }
+
+  const store = loadStore();
+  const result = setTrackingDeliveredOverride(store, owner, tracking, true);
+  if (!result.ok) return res.status(result.status).json(result);
+  saveStore(store);
+
+  logAt("info", "telegram_tracking_marked_delivered", {
+    req_id: req.reqId,
+    telegram_user_id: req.telegramSession.telegram_user_id,
+    owner,
+    tracking
+  });
+
+  return res.json({
+    ok: true,
+    owner,
+    tracking,
+    delivered_override: true
+  });
+});
 
 // Carriers live in ./carriers.js for easier maintenance (names + keys).
 // CARRIERS: { alias: { key, name }, ... }
@@ -596,6 +989,17 @@ function validateStartupConfig() {
     });
   }
 
+  const telegramFieldsPresent = [TELEGRAM_BOT_TOKEN, TELEGRAM_SESSION_SECRET, TELEGRAM_ACCESS_FILE]
+    .filter(Boolean)
+    .length;
+  if (telegramFieldsPresent > 0 && !hasTelegramMiniAppConfig()) {
+    logAt("warn", "telegram_miniapp_partial_config", {
+      bot_token: !!TELEGRAM_BOT_TOKEN,
+      session_secret: !!TELEGRAM_SESSION_SECRET,
+      access_file: TELEGRAM_ACCESS_FILE || null
+    });
+  }
+
   logAt("info", "startup_config_ok", {
     app_version: APP_VERSION,
     bg_enabled: BG_ENABLED,
@@ -610,7 +1014,9 @@ function validateStartupConfig() {
     track17_enabled: TRACK17_ENABLED,
     api_key_enabled: !!APP_API_KEY,
     ha_audit_log_enabled: HA_AUDIT_LOG_ENABLED,
-    ha_audit_log_level: HA_AUDIT_LOG_LEVEL
+    ha_audit_log_level: HA_AUDIT_LOG_LEVEL,
+    telegram_miniapp_configured: hasTelegramMiniAppConfig(),
+    telegram_public_base_url: TELEGRAM_PUBLIC_BASE_URL || null
   });
 }
 function ownersFromStore(store) {
@@ -1208,6 +1614,123 @@ function serializeTrackingItem(owner, o, tn) {
     delivered_at: String(meta?.delivered_at || "").trim() || null,
     out_for_delivery: effectiveIsOutForDelivery(one),
     one: shortOne(one)
+  };
+}
+
+function telegramDisplayNameFromUser(user = {}) {
+  const first = String(user?.first_name || "").trim();
+  const last = String(user?.last_name || "").trim();
+  const username = String(user?.username || "").trim();
+  return [first, last].filter(Boolean).join(" ") || username || "Telegram";
+}
+
+function trackingLifecycleState(item) {
+  if (item?.delivered_effective) return "delivered";
+  if (item?.out_for_delivery) return "out_for_delivery";
+
+  // Telegram no debería mostrar "pre-shipment". Esta heurística intenta dejar
+  // fuera prealertas y etiquetas creadas sin ocultar envíos reales.
+  const haystack = [
+    item?.one?.latest?.status,
+    item?.one?.latest?.subStatus,
+    item?.one?.latest?.description
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  const preShipmentHints = [
+    "info_received",
+    "info received",
+    "information received",
+    "shipment information received",
+    "pre transit",
+    "pre_transit",
+    "pre advice",
+    "pre_advice",
+    "label created",
+    "etiqueta creada",
+    "pedido confirmado",
+    "order processed",
+    "waiting for carrier",
+    "carrier not found"
+  ];
+
+  if (preShipmentHints.some((hint) => haystack.includes(hint))) return "pre_shipment";
+  return "in_transit";
+}
+
+function isTrackingVisibleInTelegram(item) {
+  return trackingLifecycleState(item) !== "pre_shipment";
+}
+
+function trackingLifecycleRank(state) {
+  if (state === "out_for_delivery") return 0;
+  if (state === "in_transit") return 1;
+  if (state === "delivered") return 2;
+  return 9;
+}
+
+function serializeTelegramTrackingItem(item) {
+  const lifecycle = trackingLifecycleState(item);
+  return {
+    owner: item.owner,
+    tracking: item.tracking,
+    alias: item.note || "",
+    courier: item.carrier_name || item.carrier_name_detected || "",
+    status: lifecycle,
+    status_label:
+      lifecycle === "out_for_delivery"
+        ? "En reparto"
+        : lifecycle === "delivered"
+          ? "Entregado"
+          : "Enviado",
+    delivered_effective: !!item.delivered_effective,
+    delivered_override: item.delivered_override,
+    imap_account: item.imap_account,
+    last_event: item?.one?.latest?.description || item?.one?.latest?.status || "Sin estado",
+    last_time: item?.one?.latest?.time || item?.delivered_at || null,
+    latest: item?.one?.latest || null
+  };
+}
+
+function listTelegramTrackings(store, allowedOwners, filters = {}) {
+  const normalizedOwners = [...new Set((allowedOwners || []).map((owner) => normalizeTelegramOwner(owner)).filter(Boolean))];
+  const statusFilter = String(filters.status || "").trim().toLowerCase();
+  const courierFilter = String(filters.courier || "").trim().toLowerCase();
+  const aliasFilter = String(filters.alias || "").trim().toLowerCase();
+  const sortBy = String(filters.sort || "status").trim().toLowerCase();
+
+  const items = normalizedOwners.flatMap((owner) => {
+    applyDeliveredRetentionForOwner(store, owner, new Date());
+    const o = getOwner(store, owner);
+    if (!o) return [];
+    return ownerTrackings(o).map((tn) => serializeTrackingItem(owner, o, tn));
+  });
+
+  const visible = items
+    .filter((item) => isTrackingVisibleInTelegram(item))
+    .filter((item) => !statusFilter || trackingLifecycleState(item) === statusFilter)
+    .filter((item) => !courierFilter || String(item.carrier_name || item.carrier_name_detected || "").toLowerCase().includes(courierFilter))
+    .filter((item) => !aliasFilter || String(item.note || "").toLowerCase().includes(aliasFilter))
+    .map((item) => serializeTelegramTrackingItem(item));
+
+  visible.sort((a, b) => {
+    if (sortBy === "recent") {
+      return (Date.parse(b.last_time || "") || 0) - (Date.parse(a.last_time || "") || 0);
+    }
+    if (sortBy === "oldest") {
+      return (Date.parse(a.last_time || "") || 0) - (Date.parse(b.last_time || "") || 0);
+    }
+    const rankDiff = trackingLifecycleRank(a.status) - trackingLifecycleRank(b.status);
+    if (rankDiff !== 0) return rankDiff;
+    return (Date.parse(b.last_time || "") || 0) - (Date.parse(a.last_time || "") || 0);
+  });
+
+  const couriers = [...new Set(visible.map((item) => String(item.courier || "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return {
+    items: visible,
+    couriers
   };
 }
 
@@ -2607,6 +3130,12 @@ module.exports = {
     manualDeliveredAtForRetention,
     setTrackingDeliveredOverride,
     extractIgnoreTerms,
-    markTrackingAsNotPackage
+    markTrackingAsNotPackage,
+    normalizeTelegramAccessEntry,
+    parseTelegramInitData,
+    createTelegramSessionToken,
+    verifyTelegramSessionToken,
+    trackingLifecycleState,
+    listTelegramTrackings
   }
 };

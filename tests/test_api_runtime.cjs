@@ -1,7 +1,22 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 
 const { _test } = require("../src/index.js");
+
+function buildTelegramInitData(user, botToken, authDate = 1_772_000_000) {
+  const params = new URLSearchParams();
+  params.set("auth_date", String(authDate));
+  params.set("query_id", "AAEAAAE");
+  params.set("user", JSON.stringify(user));
+
+  const entries = [...params.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const dataCheckString = entries.map(([key, value]) => `${key}=${value}`).join("\n");
+  const secret = crypto.createHmac("sha256", "WebAppData").update(botToken).digest();
+  const hash = crypto.createHmac("sha256", secret).update(dataCheckString).digest("hex");
+  params.set("hash", hash);
+  return params.toString();
+}
 
 test("retention only removes manually delivered packages", () => {
   const store = {
@@ -132,4 +147,95 @@ test("mark not package removes tracking and stores ignore rule terms", () => {
     store.owners.owner_a.imap_ignore_rules[0].description_terms,
     ["boleto", "euromillones", "validado"]
   );
+});
+
+test("telegram init data validates signed user payload", () => {
+  const initData = buildTelegramInitData(
+    { id: 123456789, first_name: "Mini", username: "mini_user" },
+    "123456:TEST_TOKEN"
+  );
+
+  const parsed = _test.parseTelegramInitData(initData, {
+    botToken: "123456:TEST_TOKEN",
+    maxAgeSec: 999999999
+  });
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.user_id, 123456789);
+  assert.equal(parsed.user.username, "mini_user");
+});
+
+test("telegram session token roundtrip keeps payload until expiry", () => {
+  const token = _test.createTelegramSessionToken(
+    {
+      telegram_user_id: 123,
+      owners: ["owner_a"],
+      exp: Math.floor(Date.now() / 1000) + 600
+    },
+    "session-secret"
+  );
+
+  const verified = _test.verifyTelegramSessionToken(token, "session-secret");
+
+  assert.equal(verified.ok, true);
+  assert.equal(verified.payload.telegram_user_id, 123);
+  assert.deepEqual(verified.payload.owners, ["owner_a"]);
+});
+
+test("telegram listing excludes pre-shipment and foreign owners", () => {
+  const store = {
+    owners: {
+      owner_a: {
+        trackings: ["PRE1", "LIVE1", "DONE1"],
+        meta: {
+          PRE1: { source: "imap", note: "Prealerta" },
+          LIVE1: { source: "imap", note: "Caja cocina" },
+          DONE1: { source: "imap", note: "Zapatos" }
+        },
+        last: {
+          PRE1: {
+            number: "PRE1",
+            carrierName: "Correos",
+            latest: { status: "info_received", description: "Etiqueta creada", time: "2026-03-01T10:00:00Z" },
+            flags: { isDelivered: false, isOutForDelivery: false }
+          },
+          LIVE1: {
+            number: "LIVE1",
+            carrierName: "GLS",
+            latest: { status: "in_transit", description: "Enviado desde origen", time: "2026-03-10T10:00:00Z" },
+            flags: { isDelivered: false, isOutForDelivery: false }
+          },
+          DONE1: {
+            number: "DONE1",
+            carrierName: "DHL",
+            latest: { status: "delivered", description: "Entregado", time: "2026-03-12T10:00:00Z" },
+            flags: { isDelivered: true, isOutForDelivery: false }
+          }
+        }
+      },
+      owner_b: {
+        trackings: ["OTHER1"],
+        meta: {
+          OTHER1: { source: "imap", note: "Otro owner" }
+        },
+        last: {
+          OTHER1: {
+            number: "OTHER1",
+            carrierName: "UPS",
+            latest: { status: "in_transit", description: "En camino", time: "2026-03-11T10:00:00Z" },
+            flags: { isDelivered: false, isOutForDelivery: true }
+          }
+        }
+      }
+    }
+  };
+
+  const result = _test.listTelegramTrackings(store, ["owner_a"], { sort: "status" });
+
+  assert.deepEqual(
+    result.items.map((item) => item.tracking),
+    ["LIVE1", "DONE1"]
+  );
+  assert.equal(result.items[0].status, "in_transit");
+  assert.equal(result.items[1].status, "delivered");
 });

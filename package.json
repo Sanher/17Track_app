@@ -1,6 +1,6 @@
 {
   "name": "17track_app",
-  "version": "2.4.1",
+  "version": "2.4.2",
   "private": true,
   "type": "commonjs",
   "main": "src/index.js",
@@ -8,8 +8,7 @@
     "start": "node -r dotenv/config src/index.js",
     "imap:worker": "python3 scripts/imap_ingest_worker.py",
     "test:imap": "python3 -m unittest -v tests/test_imap_ingest_worker.py",
-    "test:api": "node --test tests/test_api_runtime.cjs",
-    "store:purge-track17": "node scripts/purge_track17_store.js"
+    "test:api": "node --test tests/test_api_runtime.cjs"
   },
   "dependencies": {
     "dotenv": "^17.2.3",

@@ -33,6 +33,7 @@ const TELEGRAM_PUBLIC_BASE_URL = String(process.env.TELEGRAM_PUBLIC_BASE_URL || 
 const TELEGRAM_INIT_DATA_MAX_AGE_SEC = Number(process.env.TELEGRAM_INIT_DATA_MAX_AGE_SEC || 3600);
 const TELEGRAM_SESSION_TTL_SEC = Number(process.env.TELEGRAM_SESSION_TTL_SEC || 12 * 60 * 60);
 const TELEGRAM_SESSION_COOKIE = "tg_paquetes_session";
+const HA_USER_OWNERS_FILE = String(process.env.HA_USER_OWNERS_FILE || "/config/ha_user_owners.json").trim();
 const APP_ROOT_DIR = path.join(__dirname, "..");
 const IMAP_WORKER_SCRIPT = path.join(APP_ROOT_DIR, "scripts", "imap_ingest_worker.py");
 
@@ -228,6 +229,116 @@ function telegramAccessForUserId(userIdRaw) {
   const userId = Number(userIdRaw);
   if (!Number.isFinite(userId) || userId <= 0) return null;
   return loadTelegramAccessEntries().find((entry) => entry.telegram_user_id === userId) || null;
+}
+
+function normalizeHaOwnerAccessEntry(entry) {
+  const haUserId = String(entry?.ha_user_id ?? entry?.haUserId ?? entry?.user_id ?? entry?.userId ?? "").trim();
+  if (!haUserId) return null;
+
+  const ownersRaw = Array.isArray(entry?.owners) ? entry.owners : [entry?.owner];
+  const owners = [...new Set(ownersRaw.map((value) => normalizeTelegramOwner(value)).filter(Boolean))];
+  if (!owners.length) return null;
+
+  return {
+    ha_user_id: haUserId,
+    owners,
+    label: String(entry?.label || entry?.name || "").trim() || null,
+    active: maybeBool(entry?.active) !== false
+  };
+}
+
+function loadHaOwnerAccessEntries() {
+  if (!HA_USER_OWNERS_FILE) return [];
+  try {
+    if (!fs.existsSync(HA_USER_OWNERS_FILE)) return [];
+    const raw = fs.readFileSync(HA_USER_OWNERS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed) ? parsed : [];
+    return items
+      .map((entry) => normalizeHaOwnerAccessEntry(entry))
+      .filter((entry) => entry && entry.active);
+  } catch (e) {
+    logAt("error", "ha_owner_access_file_invalid", {
+      file: HA_USER_OWNERS_FILE,
+      error: String(e.message || e)
+    });
+    return [];
+  }
+}
+
+function headerValue(headers, key) {
+  if (!headers || typeof headers !== "object") return "";
+  const target = String(key || "").toLowerCase();
+  for (const [name, value] of Object.entries(headers)) {
+    if (String(name || "").toLowerCase() !== target) continue;
+    if (Array.isArray(value)) return String(value[0] || "").trim();
+    return String(value || "").trim();
+  }
+  return "";
+}
+
+function haOwnerAccessFromHeaders(headers, entries = loadHaOwnerAccessEntries()) {
+  const haUserId = headerValue(headers, "x-remote-user-id");
+  if (!haUserId) {
+    return {
+      via_ingress: false,
+      mapped: false,
+      ha_user_id: null,
+      display_name: null,
+      owners: []
+    };
+  }
+
+  const displayName = headerValue(headers, "x-remote-user-display-name") || headerValue(headers, "x-remote-user-name") || null;
+  const access = Array.isArray(entries) ? entries.find((entry) => entry.ha_user_id === haUserId) || null : null;
+  return {
+    via_ingress: true,
+    mapped: !!access,
+    ha_user_id: haUserId,
+    display_name: displayName,
+    owners: access?.owners || [],
+    label: access?.label || null
+  };
+}
+
+function filterOwnersForHaIngress(owners, access) {
+  if (!access?.via_ingress || !access?.mapped) return owners;
+  const allowedOwners = new Set((access.owners || []).map((owner) => normalizeTelegramOwner(owner)).filter(Boolean));
+  return owners.filter((entry) => allowedOwners.has(normalizeTelegramOwner(entry?.owner)));
+}
+
+function enforceHaIngressOwnerAccess(req, res, next) {
+  const access = haOwnerAccessFromHeaders(req.headers);
+  req.haIngressAccess = access;
+
+  if (!access.via_ingress) return next();
+  if (!access.mapped) {
+    const payload = {
+      req_id: req.reqId,
+      ha_user_id: access.ha_user_id,
+      display_name: access.display_name,
+      path: req.originalUrl,
+      error: "ha_user_not_allowed"
+    };
+    logAt("warn", "ha_ingress_user_denied", payload);
+    postHaAuditLogSafe("warn", "ha_ingress_user_denied", payload);
+    return res.status(403).json({ ok: false, error: "ha_user_not_allowed" });
+  }
+
+  const owner = normalizeTelegramOwner(req.params.owner);
+  if (!owner || access.owners.includes(owner)) return next();
+
+  const payload = {
+    req_id: req.reqId,
+    ha_user_id: access.ha_user_id,
+    display_name: access.display_name,
+    owner,
+    path: req.originalUrl,
+    error: "ha_owner_not_allowed"
+  };
+  logAt("warn", "ha_ingress_owner_denied", payload);
+  postHaAuditLogSafe("warn", "ha_ingress_owner_denied", payload);
+  return res.status(403).json({ ok: false, error: "ha_owner_not_allowed" });
 }
 
 function safeCompareHex(a, b) {
@@ -461,6 +572,8 @@ app.use((req, res, next) => {
   return res.status(401).json({ ok: false, error: "unauthorized" });
 });
 
+app.use("/api/owner/:owner", enforceHaIngressOwnerAccess);
+
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/api/_build", (_req, res) => res.json({ ok: true, build: APP_VERSION, has_trackings: true }));
 
@@ -582,11 +695,43 @@ app.get("/api/telegram/imap/status", (req, res) => {
   });
 });
 
+app.get("/api/ui/imap/status", (req, res) => {
+  const access = haOwnerAccessFromHeaders(req.headers);
+  if (access.via_ingress && !access.mapped) {
+    return res.status(403).json({ ok: false, error: "ha_user_not_allowed" });
+  }
+  return res.json({
+    ok: true,
+    running: imapManualRefreshState.running,
+    pid: imapManualRefreshState.pid,
+    last_started_at: imapManualRefreshState.last_started_at,
+    last_finished_at: imapManualRefreshState.last_finished_at,
+    last_exit_code: imapManualRefreshState.last_exit_code,
+    last_error: imapManualRefreshState.last_error
+  });
+});
+
 app.post("/api/telegram/imap/refresh", (req, res) => {
   const result = triggerManualImapRefresh({
     source: "telegram_miniapp",
     telegram_user_id: req.telegramSession.telegram_user_id,
     owners: req.telegramSession.owners
+  });
+
+  const status = result.ok ? 200 : 503;
+  return res.status(status).json(result);
+});
+
+app.post("/api/ui/imap/refresh", (req, res) => {
+  const access = haOwnerAccessFromHeaders(req.headers);
+  if (access.via_ingress && !access.mapped) {
+    return res.status(403).json({ ok: false, error: "ha_user_not_allowed" });
+  }
+
+  const result = triggerManualImapRefresh({
+    source: "ingress_ui",
+    ha_user_id: access.ha_user_id || null,
+    owners: access.owners || []
   });
 
   const status = result.ok ? 200 : 503;
@@ -1076,9 +1221,9 @@ function validateStartupConfig() {
     ha_configured: !!(HA_URL && HA_TOKEN),
     json_limit: APP_JSON_LIMIT,
     track17_enabled: TRACK17_ENABLED,
-    api_key_enabled: !!APP_API_KEY,
     ha_audit_log_enabled: HA_AUDIT_LOG_ENABLED,
     ha_audit_log_level: HA_AUDIT_LOG_LEVEL,
+    ha_user_owners_file: HA_USER_OWNERS_FILE || null,
     telegram_miniapp_configured: hasTelegramMiniAppConfig(),
     telegram_public_base_url: TELEGRAM_PUBLIC_BASE_URL || null
   });
@@ -1834,6 +1979,7 @@ function serializeTelegramTrackingItem(item) {
     delivered_effective: !!item.delivered_effective,
     delivered_override: item.delivered_override,
     imap_account: item.imap_account,
+    sender: item?.one?.latest?.sender || "",
     last_event: item?.one?.latest?.description || item?.one?.latest?.status || "Sin estado",
     last_time: item?.one?.latest?.time || item?.delivered_at || null,
     latest: item?.one?.latest || null
@@ -2591,8 +2737,22 @@ app.get("/api/store", (_req, res) => {
 app.get("/api/ui/owners", (req, res) => {
   const store = loadStore();
   applyDeliveredRetentionForAllOwnersAndPersist(store, { reqId: req.reqId });
+  const access = haOwnerAccessFromHeaders(req.headers);
+  if (access.via_ingress && !access.mapped) {
+    const payload = {
+      req_id: req.reqId,
+      ha_user_id: access.ha_user_id,
+      display_name: access.display_name,
+      path: req.originalUrl,
+      error: "ha_user_not_allowed"
+    };
+    logAt("warn", "ha_ingress_user_denied", payload);
+    postHaAuditLogSafe("warn", "ha_ingress_user_denied", payload);
+    return res.status(403).json({ ok: false, error: "ha_user_not_allowed" });
+  }
 
-  const owners = ownersFromStore(store)
+  const owners = filterOwnersForHaIngress(
+    ownersFromStore(store)
     .sort((a, b) => a.localeCompare(b))
     .map((owner) => {
       const o = getOwner(store, owner);
@@ -2615,7 +2775,9 @@ app.get("/api/ui/owners", (req, res) => {
         items
       };
     })
-    .filter(Boolean);
+    .filter(Boolean),
+    access
+  );
 
   const totalItems = owners.reduce((acc, owner) => acc + owner.count, 0);
   return res.json({
@@ -2623,6 +2785,11 @@ app.get("/api/ui/owners", (req, res) => {
     owners_count: owners.length,
     total_items: totalItems,
     delivered_retention_days: DELIVERED_RETENTION_DAYS,
+    scoped_by_ha_user: access.via_ingress ? {
+      ha_user_id: access.ha_user_id,
+      display_name: access.display_name,
+      owners: access.owners
+    } : null,
     owners
   });
 });
@@ -3504,6 +3671,9 @@ module.exports = {
     splitLogLines,
     ownerTrackings,
     sanitizeStore,
-    reconcileImapAccountOwnership
+    reconcileImapAccountOwnership,
+    normalizeHaOwnerAccessEntry,
+    haOwnerAccessFromHeaders,
+    filterOwnersForHaIngress
   }
 };

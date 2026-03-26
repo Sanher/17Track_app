@@ -229,6 +229,61 @@ test("mark not package removes tracking and stores ignore rule terms", () => {
   );
 });
 
+test("normalizeHaOwnerAccessEntry normalizes HA ingress access rows", () => {
+  const entry = _test.normalizeHaOwnerAccessEntry({
+    ha_user_id: "user-123",
+    owners: [" David ", "mireia", "david"],
+    active: true,
+    label: "Familia"
+  });
+
+  assert.deepEqual(entry, {
+    ha_user_id: "user-123",
+    owners: ["david", "mireia"],
+    label: "Familia",
+    active: true
+  });
+});
+
+test("haOwnerAccessFromHeaders resolves ingress user owner scope", () => {
+  const access = _test.haOwnerAccessFromHeaders(
+    {
+      "x-remote-user-id": "ha-user-a",
+      "x-remote-user-display-name": "Usuario HA"
+    },
+    [
+      { ha_user_id: "ha-user-a", owners: ["david"] },
+      { ha_user_id: "ha-user-b", owners: ["mireia"] }
+    ]
+  );
+
+  assert.deepEqual(access, {
+    via_ingress: true,
+    mapped: true,
+    ha_user_id: "ha-user-a",
+    display_name: "Usuario HA",
+    owners: ["david"],
+    label: null
+  });
+});
+
+test("filterOwnersForHaIngress keeps only allowed owners for ingress user", () => {
+  const owners = _test.filterOwnersForHaIngress(
+    [
+      { owner: "david", count: 2 },
+      { owner: "mireia", count: 1 }
+    ],
+    {
+      via_ingress: true,
+      mapped: true,
+      ha_user_id: "ha-user-a",
+      owners: ["mireia"]
+    }
+  );
+
+  assert.deepEqual(owners, [{ owner: "mireia", count: 1 }]);
+});
+
 test("telegram init data validates signed user payload", () => {
   const initData = buildTelegramInitData(
     { id: 123456789, first_name: "Mini", username: "mini_user" },

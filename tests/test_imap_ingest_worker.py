@@ -327,7 +327,16 @@ class ExtractionAndAuthTests(unittest.TestCase):
             sender="Amazon.es <auto-confirm@amazon.es>",
         )
 
-        self.assertIn("171-6273296-7097149", found)
+        self.assertEqual(found, ["171-6273296-7097149"])
+
+    def test_extract_tracking_numbers_strips_quoted_printable_garbage_for_amazon_sender(self):
+        found = worker.extract_tracking_numbers(
+            subject='Fwd: Pedido: "Oral-B Pro CrossAction..."',
+            body="Pedido n.º =3D405-0201761-6227578 texto =20O0ZVWEXWRVQN y =35VDYOD7RE69T y enlace GD1MOZ5VDE85",
+            sender="Amazon.es <auto-confirm@amazon.es>",
+        )
+
+        self.assertEqual(found, ["405-0201761-6227578"])
 
     def test_message_auth_flags_reads_authentication_results(self):
         msg = EmailMessage()

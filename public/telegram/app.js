@@ -16,7 +16,6 @@ const lockedMessage = document.getElementById("lockedMessage");
 const statusBar = document.getElementById("statusBar");
 const listRoot = document.getElementById("listRoot");
 const itemTemplate = document.getElementById("itemTemplate");
-const refreshButton = document.getElementById("refreshButton");
 const refreshMailButton = document.getElementById("refreshMailButton");
 const statusFilter = document.getElementById("statusFilter");
 const courierFilter = document.getElementById("courierFilter");
@@ -198,6 +197,7 @@ function renderItems() {
     node.querySelector(".owner").textContent = item.owner;
     node.querySelector(".alias").textContent = item.alias || "Sin alias";
     node.querySelector(".courier").textContent = item.courier || "Sin courier";
+    node.querySelector(".sender").textContent = item.sender || "Sin remitente";
     node.querySelector(".event").textContent = item.last_event || "Sin estado";
     node.querySelector(".when").textContent = formatWhen(item.last_time);
 
@@ -287,10 +287,6 @@ async function bootstrap() {
     setStatus(message, true);
   }
 }
-
-refreshButton.addEventListener("click", () => {
-  loadTrackings().catch((error) => setStatus(`No se pudo actualizar: ${error.message}`, true));
-});
 
 refreshMailButton.addEventListener("click", async () => {
   setMailRefreshBusy(true);

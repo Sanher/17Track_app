@@ -1,20 +1,18 @@
 const state = {
   owners: [],
-  apiKey: localStorage.getItem("paquetes_app_api_key") || "",
   search: "",
   dateFrom: "",
   dateTo: "",
   selectedKeys: new Set(),
-  theme: localStorage.getItem("paquetes_app_theme") || ""
+  theme: localStorage.getItem("paquetes_app_theme") || "",
+  scopedByHaUser: null,
+  refreshPollId: null
 };
 
+const heroText = document.getElementById("heroText");
 const themeToggleButton = document.getElementById("themeToggleButton");
 const refreshButton = document.getElementById("refreshButton");
-const authToggleButton = document.getElementById("authToggleButton");
-const saveApiKeyButton = document.getElementById("saveApiKeyButton");
-const clearApiKeyButton = document.getElementById("clearApiKeyButton");
-const apiKeyInput = document.getElementById("apiKeyInput");
-const authPanel = document.getElementById("authPanel");
+const refreshMailButton = document.getElementById("refreshMailButton");
 const searchInput = document.getElementById("searchInput");
 const dateFromInput = document.getElementById("dateFromInput");
 const dateToInput = document.getElementById("dateToInput");
@@ -50,8 +48,11 @@ const bulkButtons = [
   selectOlderButton,
   deleteOlderButton
 ];
-
-apiKeyInput.value = state.apiKey;
+function setMailRefreshBusy(isBusy) {
+  if (!refreshMailButton) return;
+  refreshMailButton.disabled = isBusy;
+  refreshMailButton.textContent = isBusy ? "Refrescando..." : "Refrescar correo";
+}
 
 function preferredTheme() {
   if (state.theme === "light" || state.theme === "dark") return state.theme;
@@ -77,6 +78,30 @@ function toggleTheme() {
   applyTheme(preferredTheme() === "dark" ? "light" : "dark");
 }
 
+function titleCaseOwner(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function ownerListLabel(owners) {
+  const labels = [...new Set((owners || []).map((owner) => titleCaseOwner(owner)).filter(Boolean))];
+  if (!labels.length) return "owners";
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return `${labels[0]} y ${labels[1]}`;
+  return `${labels.slice(0, -1).join(", ")} y ${labels.at(-1)}`;
+}
+
+function updateHeroText() {
+  if (!heroText) return;
+  const scopedOwners = Array.isArray(state.scopedByHaUser?.owners) ? state.scopedByHaUser.owners : [];
+  if (scopedOwners.length) {
+    heroText.textContent = `Vista de paquetes de ${ownerListLabel(scopedOwners)} para revisar, corregir y limpiar paquetes escaneados por correo.`;
+    return;
+  }
+  heroText.textContent = "Vista operativa por owner para revisar, corregir y limpiar paquetes escaneados por correo.";
+}
+
 function setStatus(message, type = "info") {
   if (!message) {
     statusBar.textContent = "";
@@ -99,9 +124,7 @@ function escapeHtml(value) {
 }
 
 function buildHeaders(extra = {}) {
-  const headers = { ...extra };
-  if (state.apiKey) headers["X-API-Key"] = state.apiKey;
-  return headers;
+  return { ...extra };
 }
 
 async function apiFetch(url, options = {}) {
@@ -113,10 +136,6 @@ async function apiFetch(url, options = {}) {
     ? rawUrl
     : new URL(rawUrl.replace(/^\/+/, ""), window.location.href).toString();
   const response = await fetch(finalUrl, { ...options, headers });
-  if (response.status === 401) {
-    authPanel.classList.remove("hidden");
-    throw new Error("unauthorized");
-  }
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     throw new Error(text || `http_${response.status}`);
@@ -124,6 +143,40 @@ async function apiFetch(url, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) return response.json();
   return response.text();
+}
+
+async function loadMailRefreshStatus() {
+  return apiFetch("/api/ui/imap/status");
+}
+
+function stopRefreshPolling() {
+  if (state.refreshPollId) {
+    window.clearInterval(state.refreshPollId);
+    state.refreshPollId = null;
+  }
+}
+
+function startRefreshPolling() {
+  stopRefreshPolling();
+  state.refreshPollId = window.setInterval(async () => {
+    try {
+      const status = await loadMailRefreshStatus();
+      if (status.running) return;
+
+      stopRefreshPolling();
+      setMailRefreshBusy(false);
+      if (status.last_exit_code === 0 || status.last_exit_code === null) {
+        setStatus("Refresco de correo completado. Actualizando listado...");
+        await loadOwners();
+      } else {
+        setStatus("El refresco de correo terminó con error. Revisa los logs del add-on.", "error");
+      }
+    } catch (error) {
+      stopRefreshPolling();
+      setMailRefreshBusy(false);
+      setStatus(`No se pudo comprobar el refresco: ${error.message}`, "error");
+    }
+  }, 4000);
 }
 
 function effectiveStatusLabel(item) {
@@ -542,15 +595,13 @@ async function loadOwners() {
   try {
     const payload = await apiFetch("/api/ui/owners");
     state.owners = Array.isArray(payload.owners) ? payload.owners : [];
+    state.scopedByHaUser = payload.scoped_by_ha_user || null;
     syncSelectionToKnownItems();
+    updateHeroText();
     renderOwners();
     setStatus(`Vista cargada. Retencion delivered: ${payload.delivered_retention_days} dias.`);
   } catch (error) {
-    if (error.message === "unauthorized") {
-      setStatus("La UI necesita API key para consultar el backend.", "error");
-    } else {
-      setStatus(`No se pudo cargar la vista: ${error.message}`, "error");
-    }
+    setStatus(`No se pudo cargar la vista: ${error.message}`, "error");
     ownersRoot.innerHTML = '<div class="empty-state">No hemos podido cargar los paquetes todavia.</div>';
   } finally {
     refreshButton.disabled = false;
@@ -561,25 +612,25 @@ refreshButton.addEventListener("click", () => {
   loadOwners();
 });
 
+refreshMailButton.addEventListener("click", async () => {
+  setMailRefreshBusy(true);
+  setStatus("Lanzando refresco de correo. Puede tardar unos momentos...");
+  try {
+    const result = await apiFetch("/api/ui/imap/refresh", { method: "POST" });
+    setStatus(result.message || "Refresco de correo lanzado. Puede tardar unos momentos.");
+    if (result.started === false && result.reason === "already_running") {
+      startRefreshPolling();
+      return;
+    }
+    startRefreshPolling();
+  } catch (error) {
+    setMailRefreshBusy(false);
+    setStatus(`No se pudo lanzar el refresco: ${error.message}`, "error");
+  }
+});
+
 themeToggleButton.addEventListener("click", () => {
   toggleTheme();
-});
-
-authToggleButton.addEventListener("click", () => {
-  authPanel.classList.toggle("hidden");
-});
-
-saveApiKeyButton.addEventListener("click", async () => {
-  state.apiKey = apiKeyInput.value.trim();
-  localStorage.setItem("paquetes_app_api_key", state.apiKey);
-  await loadOwners();
-});
-
-clearApiKeyButton.addEventListener("click", async () => {
-  state.apiKey = "";
-  apiKeyInput.value = "";
-  localStorage.removeItem("paquetes_app_api_key");
-  await loadOwners();
 });
 
 searchInput.addEventListener("input", () => {
@@ -651,5 +702,6 @@ deleteOlderButton.addEventListener("click", async () => {
 });
 
 applyTheme(preferredTheme());
+updateHeroText();
 
 loadOwners();

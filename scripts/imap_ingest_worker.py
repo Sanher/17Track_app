@@ -57,8 +57,8 @@ TRACKING_STRONG_PATTERNS = [
     re.compile(r"\b(?:94|93|92|95)[0-9]{20,22}\b"),  # USPS families
     re.compile(r"\b[0-9]{18,22}\b"),  # long numeric IDs
 ]
-TRACKING_WEAK_PATTERN = re.compile(r"\b[A-Z0-9][A-Z0-9-]{7,34}\b")
-AMAZON_ORDER_ID_PATTERN = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+TRACKING_WEAK_PATTERN = re.compile(r"(?<![=])\b[A-Z0-9][A-Z0-9-]{7,34}\b")
+AMAZON_ORDER_ID_PATTERN = re.compile(r"(?:=3D)?(\d{3}-\d{7}-\d{7})\b")
 
 SHIPPING_KEYWORDS = {
     "tracking",
@@ -601,6 +601,7 @@ def extract_tracking_numbers(subject: str, body: str, sender: str = "") -> list[
     lower = source.lower()
     found: list[str] = []
     seen: set[str] = set()
+    is_amazon_sender = official_amazon_sender(sender)
 
     def add_candidate(raw: str) -> None:
         tn = normalize_tracking(raw)
@@ -615,12 +616,12 @@ def extract_tracking_numbers(subject: str, body: str, sender: str = "") -> list[
         for match in regex.findall(source):
             add_candidate(match)
 
-    if official_amazon_sender(sender):
+    if is_amazon_sender:
         for match in extract_amazon_order_ids(subject, body, sender=sender):
             add_candidate(match)
 
     trusted_sender = official_carrier_from_sender(sender)
-    if trusted_sender or has_shipping_context(lower):
+    if not is_amazon_sender and (trusted_sender or has_shipping_context(lower)):
         for match in TRACKING_WEAK_PATTERN.findall(source):
             add_candidate(match)
 

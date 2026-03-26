@@ -10,29 +10,17 @@
   <div class="page-shell">
     <header class="hero">
       <div class="hero-copy">
-        <p class="eyebrow">Home Assistant ingress</p>
         <h1>Paquetes IMAP</h1>
-        <p class="hero-text">
+        <p id="heroText" class="hero-text">
           Vista operativa por owner para revisar, corregir y limpiar paquetes escaneados por correo.
         </p>
       </div>
       <div class="hero-actions">
-        <button id="themeToggleButton" class="ghost-button" type="button">Modo oscuro</button>
-        <button id="refreshButton" class="primary-button" type="button">Actualizar</button>
-        <button id="authToggleButton" class="ghost-button" type="button">API key</button>
+        <button id="refreshMailButton" class="ghost-button hero-action-button" type="button">Refrescar correo</button>
+        <button id="refreshButton" class="ghost-button hero-action-button" type="button">Actualiza listado</button>
+        <button id="themeToggleButton" class="ghost-button hero-action-button" type="button">Modo oscuro</button>
       </div>
     </header>
-
-    <section id="authPanel" class="auth-panel hidden">
-      <label class="field">
-        <span>API key</span>
-        <input id="apiKeyInput" type="password" autocomplete="off" placeholder="Solo si APP_API_KEY esta activo">
-      </label>
-      <div class="auth-actions">
-        <button id="saveApiKeyButton" class="primary-button" type="button">Guardar</button>
-        <button id="clearApiKeyButton" class="ghost-button" type="button">Borrar</button>
-      </div>
-    </section>
 
     <section class="toolbar">
       <div class="toolbar-filters">
@@ -49,6 +37,17 @@
           <input id="dateToInput" type="date">
         </label>
         <button id="clearFiltersButton" class="ghost-button" type="button">Limpiar filtros</button>
+        <details id="cleanupDetails" class="cleanup-details">
+          <summary>Limpieza por antiguedad</summary>
+          <div class="cleanup-actions">
+            <label class="field compact-field cleanup-field">
+              <span>Conservar dias</span>
+              <input id="olderThanDaysInput" type="number" min="1" step="1" inputmode="numeric" placeholder="60">
+            </label>
+            <button id="selectOlderButton" class="ghost-button" type="button">Seleccionar anteriores</button>
+            <button id="deleteOlderButton" class="danger-button" type="button">Borrar anteriores</button>
+          </div>
+        </details>
       </div>
       <div id="statsBar" class="stats-bar"></div>
     </section>
@@ -62,18 +61,6 @@
         <button id="bulkUndeliveredButton" class="soft-button" type="button">Undelivered</button>
         <button id="bulkNotPackageButton" class="soft-button" type="button">No es paquete</button>
         <button id="bulkDeleteButton" class="danger-button" type="button">Borrar</button>
-      </div>
-    </section>
-
-    <section id="cleanupBar" class="selection-bar cleanup-bar">
-      <p class="selection-summary">Limpieza por antiguedad</p>
-      <div class="selection-actions">
-        <label class="field compact-field cleanup-field">
-          <span>Conservar dias</span>
-          <input id="olderThanDaysInput" type="number" min="1" step="1" inputmode="numeric" placeholder="60">
-        </label>
-        <button id="selectOlderButton" class="ghost-button" type="button">Seleccionar anteriores</button>
-        <button id="deleteOlderButton" class="danger-button" type="button">Borrar anteriores</button>
       </div>
     </section>
 

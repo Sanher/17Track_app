@@ -79,15 +79,6 @@ body {
   box-shadow: var(--shadow);
 }
 
-.eyebrow {
-  margin: 0 0 10px;
-  color: var(--accent-deep);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
 .hero h1 {
   margin: 0;
   font-family: Georgia, "Times New Roman", serif;
@@ -109,6 +100,19 @@ body {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.hero-actions {
+  justify-content: flex-end;
+  align-items: start;
+}
+
+.hero-action-button {
+  min-height: 40px;
+  padding: 9px 14px;
+  font-size: 14px;
+  line-height: 1.1;
+  box-shadow: none;
 }
 
 .auth-panel,
@@ -141,15 +145,59 @@ body {
   flex: 1 1 auto;
 }
 
+.cleanup-details {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.34);
+  padding: 10px 12px 12px;
+}
+
+.cleanup-details summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  list-style: none;
+  color: var(--accent-deep);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.cleanup-details summary::after {
+  content: "›";
+  font-size: 18px;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.cleanup-details[open] summary {
+  margin-bottom: 12px;
+}
+
+.cleanup-details[open] summary::after {
+  transform: rotate(90deg);
+}
+
+.cleanup-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.cleanup-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+
 .selection-bar {
   display: flex;
   justify-content: space-between;
   gap: 16px;
   align-items: center;
-}
-
-.cleanup-bar {
-  align-items: end;
 }
 
 .selection-summary {
@@ -474,6 +522,10 @@ button:disabled {
 :root[data-theme="dark"] .field input {
   border-color: rgba(236, 241, 237, 0.12);
   background: rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme="dark"] .cleanup-details {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 :root[data-theme="dark"] .soft-button {

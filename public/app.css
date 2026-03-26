@@ -227,6 +227,29 @@ body {
   box-shadow: var(--shadow);
 }
 
+.add-tracking-card {
+  display: grid;
+  gap: 14px;
+}
+
+.raw-debug-card {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.raw-debug-output {
+  max-height: min(62vh, 720px);
+  overflow: auto;
+  margin: 0;
+  padding: 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .confirm-title {
   margin: 0 0 10px;
   font-family: Georgia, "Times New Roman", serif;
@@ -267,7 +290,8 @@ body {
   color: var(--muted);
 }
 
-.field input {
+.field input,
+.field select {
   width: 100%;
   min-height: 46px;
   padding: 12px 14px;
@@ -278,7 +302,8 @@ body {
   font-size: 15px;
 }
 
-.field input:focus {
+.field input:focus,
+.field select:focus {
   outline: 2px solid rgba(201, 92, 52, 0.25);
   border-color: rgba(201, 92, 52, 0.6);
 }
@@ -519,9 +544,15 @@ button:disabled {
   color: var(--muted);
 }
 
-:root[data-theme="dark"] .field input {
+:root[data-theme="dark"] .field input,
+:root[data-theme="dark"] .field select {
   border-color: rgba(236, 241, 237, 0.12);
   background: rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme="dark"] .raw-debug-output {
+  border-color: rgba(236, 241, 237, 0.12);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 :root[data-theme="dark"] .cleanup-details {

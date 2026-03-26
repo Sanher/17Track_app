@@ -284,6 +284,71 @@ test("filterOwnersForHaIngress keeps only allowed owners for ingress user", () =
   assert.deepEqual(owners, [{ owner: "owner_b", count: 1 }]);
 });
 
+test("canViewHaIngressDebug only allows ingress users scoped to david", () => {
+  assert.equal(
+    _test.canViewHaIngressDebug({
+      via_ingress: true,
+      mapped: true,
+      owners: ["david"]
+    }),
+    true
+  );
+
+  assert.equal(
+    _test.canViewHaIngressDebug({
+      via_ingress: true,
+      mapped: true,
+      owners: ["owner_a"]
+    }),
+    false
+  );
+
+  assert.equal(
+    _test.canViewHaIngressDebug({
+      via_ingress: false,
+      mapped: false,
+      owners: ["david"]
+    }),
+    false
+  );
+});
+
+test("normalizeManualTrackingStatus accepts ingress labels and aliases", () => {
+  assert.equal(_test.normalizeManualTrackingStatus("en reparto"), "out_for_delivery");
+  assert.equal(_test.normalizeManualTrackingStatus("delivered"), "delivered");
+  assert.equal(_test.normalizeManualTrackingStatus("pedido creado"), "info_received");
+  assert.equal(_test.normalizeManualTrackingStatus(""), null);
+});
+
+test("buildManualTrackingSnapshot creates a visible synthetic snapshot", () => {
+  const snapshot = _test.buildManualTrackingSnapshot({
+    tracking: "abC123",
+    status: "out_for_delivery",
+    carrierName: "MRW",
+    note: "Auriculares",
+    time: new Date("2026-03-26T18:00:00Z")
+  });
+
+  assert.deepEqual(snapshot, {
+    number: "ABC123",
+    carrierName: "MRW",
+    latest: {
+      status: "out_for_delivery",
+      subStatus: null,
+      description: "En reparto · Auriculares",
+      time: "2026-03-26T18:00:00.000Z",
+      carrierName: "MRW",
+      subject: "Alta manual desde ingress",
+      sender: "Alta manual"
+    },
+    flags: {
+      isOutForDelivery: true,
+      isDelivered: false
+    },
+    error: null
+  });
+});
+
 test("telegram init data validates signed user payload", () => {
   const initData = buildTelegramInitData(
     { id: 123456789, first_name: "Mini", username: "mini_user" },

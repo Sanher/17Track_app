@@ -10,6 +10,8 @@ const state = {
 };
 
 const heroText = document.getElementById("heroText");
+const addTrackingButton = document.getElementById("addTrackingButton");
+const rawDebugButton = document.getElementById("rawDebugButton");
 const themeToggleButton = document.getElementById("themeToggleButton");
 const refreshButton = document.getElementById("refreshButton");
 const refreshMailButton = document.getElementById("refreshMailButton");
@@ -37,6 +39,18 @@ const confirmDialog = document.getElementById("confirmDialog");
 const confirmDialogTitle = document.getElementById("confirmDialogTitle");
 const confirmDialogMessage = document.getElementById("confirmDialogMessage");
 const confirmDialogAccept = document.getElementById("confirmDialogAccept");
+const addTrackingDialog = document.getElementById("addTrackingDialog");
+const addTrackingForm = document.getElementById("addTrackingForm");
+const addTrackingOwnerField = document.getElementById("addTrackingOwnerField");
+const addTrackingOwnerInput = document.getElementById("addTrackingOwnerInput");
+const addTrackingIdInput = document.getElementById("addTrackingIdInput");
+const addTrackingCarrierInput = document.getElementById("addTrackingCarrierInput");
+const addTrackingStatusInput = document.getElementById("addTrackingStatusInput");
+const addTrackingAliasInput = document.getElementById("addTrackingAliasInput");
+const addTrackingCancelButton = document.getElementById("addTrackingCancelButton");
+const addTrackingSaveButton = document.getElementById("addTrackingSaveButton");
+const rawDebugDialog = document.getElementById("rawDebugDialog");
+const rawDebugOutput = document.getElementById("rawDebugOutput");
 
 const bulkButtons = [
   selectVisibleButton,
@@ -52,6 +66,13 @@ function setMailRefreshBusy(isBusy) {
   if (!refreshMailButton) return;
   refreshMailButton.disabled = isBusy;
   refreshMailButton.textContent = isBusy ? "Refrescando..." : "Refrescar correo";
+}
+
+function setAddTrackingBusy(isBusy) {
+  if (addTrackingSaveButton) addTrackingSaveButton.disabled = isBusy;
+  if (addTrackingCancelButton) addTrackingCancelButton.disabled = isBusy;
+  if (addTrackingButton) addTrackingButton.disabled = isBusy;
+  if (addTrackingSaveButton) addTrackingSaveButton.textContent = isBusy ? "Guardando..." : "Guardar";
 }
 
 function preferredTheme() {
@@ -100,6 +121,28 @@ function updateHeroText() {
     return;
   }
   heroText.textContent = "Vista operativa por owner para revisar, corregir y limpiar paquetes escaneados por correo.";
+}
+
+function availableOwnersForManualAdd() {
+  const scopedOwners = Array.isArray(state.scopedByHaUser?.owners) ? state.scopedByHaUser.owners : [];
+  if (scopedOwners.length) return [...new Set(scopedOwners.map((owner) => String(owner || "").trim().toLowerCase()).filter(Boolean))];
+  return [...new Set((state.owners || []).map((owner) => String(owner?.owner || "").trim().toLowerCase()).filter(Boolean))];
+}
+
+function primaryIngressOwner() {
+  const scopedOwners = Array.isArray(state.scopedByHaUser?.owners) ? state.scopedByHaUser.owners : [];
+  const normalized = scopedOwners.map((owner) => String(owner || "").trim().toLowerCase()).filter(Boolean);
+  return normalized[0] || "";
+}
+
+function canViewRawDebug() {
+  const scopedOwners = Array.isArray(state.scopedByHaUser?.owners) ? state.scopedByHaUser.owners : [];
+  return scopedOwners.map((owner) => String(owner || "").trim().toLowerCase()).includes("david");
+}
+
+function updateDebugButtonVisibility() {
+  if (!rawDebugButton) return;
+  rawDebugButton.classList.toggle("hidden", !canViewRawDebug());
 }
 
 function setStatus(message, type = "info") {
@@ -309,6 +352,18 @@ async function updateTrackingMeta(owner, tracking, payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+}
+
+async function addTracking(owner, payload) {
+  return apiFetch(`/api/owner/${encodeURIComponent(owner)}/tracking`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+async function loadRawDebugData() {
+  return apiFetch("/api/ui/raw");
 }
 
 async function updateDeliveredOverride(owner, tracking, delivered) {
@@ -590,6 +645,42 @@ function renderOwners() {
   }
 }
 
+function openAddTrackingDialog() {
+  if (!addTrackingDialog || typeof addTrackingDialog.showModal !== "function") return;
+  const owners = availableOwnersForManualAdd();
+  if (!owners.length) {
+    setStatus("No hay owners disponibles para crear un paquete manual.", "error");
+    return;
+  }
+
+  const scopedOwner = primaryIngressOwner();
+  const forceScopedOwner = !!scopedOwner;
+  addTrackingOwnerInput.innerHTML = owners
+    .map((owner) => `<option value="${escapeHtml(owner)}">${escapeHtml(owner)}</option>`)
+    .join("");
+  addTrackingOwnerField.classList.toggle("hidden", forceScopedOwner || owners.length <= 1);
+  addTrackingOwnerInput.value = forceScopedOwner ? scopedOwner : owners[0];
+  addTrackingIdInput.value = "";
+  addTrackingCarrierInput.value = "";
+  addTrackingStatusInput.value = "in_transit";
+  addTrackingAliasInput.value = "";
+  setAddTrackingBusy(false);
+  addTrackingDialog.showModal();
+  window.setTimeout(() => addTrackingIdInput.focus(), 20);
+}
+
+async function openRawDebugDialog() {
+  if (!rawDebugDialog || typeof rawDebugDialog.showModal !== "function") return;
+  rawDebugOutput.textContent = "Cargando...";
+  rawDebugDialog.showModal();
+  try {
+    const payload = await loadRawDebugData();
+    rawDebugOutput.textContent = JSON.stringify(payload, null, 2);
+  } catch (error) {
+    rawDebugOutput.textContent = `No se pudo cargar el raw debug: ${error.message}`;
+  }
+}
+
 async function loadOwners() {
   refreshButton.disabled = true;
   try {
@@ -598,6 +689,7 @@ async function loadOwners() {
     state.scopedByHaUser = payload.scoped_by_ha_user || null;
     syncSelectionToKnownItems();
     updateHeroText();
+    updateDebugButtonVisibility();
     renderOwners();
     setStatus(`Vista cargada. Retencion delivered: ${payload.delivered_retention_days} dias.`);
   } catch (error) {
@@ -611,6 +703,18 @@ async function loadOwners() {
 refreshButton.addEventListener("click", () => {
   loadOwners();
 });
+
+if (addTrackingButton) {
+  addTrackingButton.addEventListener("click", () => {
+    openAddTrackingDialog();
+  });
+}
+
+if (rawDebugButton) {
+  rawDebugButton.addEventListener("click", () => {
+    openRawDebugDialog();
+  });
+}
 
 refreshMailButton.addEventListener("click", async () => {
   setMailRefreshBusy(true);
@@ -632,6 +736,57 @@ refreshMailButton.addEventListener("click", async () => {
 themeToggleButton.addEventListener("click", () => {
   toggleTheme();
 });
+
+if (addTrackingCancelButton) {
+  addTrackingCancelButton.addEventListener("click", () => {
+    addTrackingDialog.close();
+  });
+}
+
+if (addTrackingForm) {
+  addTrackingForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const owners = availableOwnersForManualAdd();
+    const scopedOwner = primaryIngressOwner();
+    const owner = String(
+      (scopedOwner || (owners.length <= 1 ? owners[0] : addTrackingOwnerInput.value)) || ""
+    )
+      .trim()
+      .toLowerCase();
+    const tracking = String(addTrackingIdInput.value || "").trim().toUpperCase();
+    const carrierName = String(addTrackingCarrierInput.value || "").trim();
+    const status = String(addTrackingStatusInput.value || "in_transit").trim();
+    const note = String(addTrackingAliasInput.value || "").trim();
+
+    if (!owner) {
+      setStatus("No hay owner disponible para guardar el paquete.", "error");
+      return;
+    }
+    if (!tracking) {
+      setStatus("El ID de seguimiento es obligatorio.", "error");
+      addTrackingIdInput.focus();
+      return;
+    }
+
+    try {
+      setAddTrackingBusy(true);
+      await addTracking(owner, {
+        tracking,
+        source: "imap",
+        note,
+        carrier_name: carrierName,
+        status
+      });
+      addTrackingDialog.close();
+      setStatus(`Paquete ${tracking} guardado en ${owner}. Actualizando listado...`);
+      await loadOwners();
+    } catch (error) {
+      setStatus(`No se pudo guardar el paquete manual: ${error.message}`, "error");
+    } finally {
+      setAddTrackingBusy(false);
+    }
+  });
+}
 
 searchInput.addEventListener("input", () => {
   state.search = searchInput.value;

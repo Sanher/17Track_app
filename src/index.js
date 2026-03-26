@@ -307,6 +307,12 @@ function filterOwnersForHaIngress(owners, access) {
   return owners.filter((entry) => allowedOwners.has(normalizeTelegramOwner(entry?.owner)));
 }
 
+function canViewHaIngressDebug(access, owner = "david") {
+  if (!access?.via_ingress || !access?.mapped) return false;
+  const target = normalizeTelegramOwner(owner);
+  return !!target && (access.owners || []).includes(target);
+}
+
 function enforceHaIngressOwnerAccess(req, res, next) {
   const access = haOwnerAccessFromHeaders(req.headers);
   req.haIngressAccess = access;
@@ -708,6 +714,46 @@ app.get("/api/ui/imap/status", (req, res) => {
     last_finished_at: imapManualRefreshState.last_finished_at,
     last_exit_code: imapManualRefreshState.last_exit_code,
     last_error: imapManualRefreshState.last_error
+  });
+});
+
+app.get("/api/ui/raw", (req, res) => {
+  const access = haOwnerAccessFromHeaders(req.headers);
+  if (!canViewHaIngressDebug(access, "david")) {
+    const payload = {
+      req_id: req.reqId,
+      ha_user_id: access.ha_user_id,
+      display_name: access.display_name,
+      path: req.originalUrl,
+      error: "ha_debug_not_allowed"
+    };
+    logAt("warn", "ha_ingress_raw_debug_denied", payload);
+    postHaAuditLogSafe("warn", "ha_ingress_raw_debug_denied", payload);
+    return res.status(403).json({ ok: false, error: "ha_debug_not_allowed" });
+  }
+
+  const store = loadStore();
+  applyDeliveredRetentionForAllOwnersAndPersist(store, { reqId: req.reqId });
+  const owner = "david";
+  const rawOwner = getOwner(store, owner);
+  const allowedPayload = {
+    req_id: req.reqId,
+    ha_user_id: access.ha_user_id,
+    display_name: access.display_name,
+    owner
+  };
+  logAt("info", "ha_ingress_raw_debug_opened", allowedPayload);
+  postHaAuditLogSafe("info", "ha_ingress_raw_debug_opened", allowedPayload);
+  return res.json({
+    ok: true,
+    owner,
+    data: rawOwner || {
+      trackings: [],
+      meta: {},
+      last: {},
+      imap_accounts: [],
+      imap_ignore_rules: []
+    }
   });
 });
 
@@ -1517,6 +1563,56 @@ function getOwner(store, owner) {
 
 function normalizeTracking(tn) {
   return String(tn || "").trim().toUpperCase();
+}
+
+function normalizeManualTrackingStatus(statusRaw) {
+  const value = String(statusRaw || "").trim().toLowerCase();
+  if (!value) return null;
+  if (["in_transit", "transit", "enviado", "in transit"].includes(value)) return "in_transit";
+  if (["out_for_delivery", "out for delivery", "reparto", "en reparto"].includes(value)) return "out_for_delivery";
+  if (["delivered", "entregado"].includes(value)) return "delivered";
+  if (["info_received", "info received", "pedido", "pedido_creado", "pedido creado"].includes(value)) return "info_received";
+  return null;
+}
+
+function manualTrackingStatusLabel(status) {
+  if (status === "out_for_delivery") return "En reparto";
+  if (status === "delivered") return "Entregado";
+  if (status === "info_received") return "Pedido creado";
+  return "Enviado";
+}
+
+// Manual additions need a synthetic snapshot so they enter the same list,
+// editing and retention flow as IMAP-ingested packages without waiting for mail.
+function buildManualTrackingSnapshot({
+  tracking,
+  status = "in_transit",
+  carrierName = "",
+  note = "",
+  time = new Date()
+}) {
+  const iso = time instanceof Date ? time.toISOString() : new Date().toISOString();
+  const normalizedStatus = normalizeManualTrackingStatus(status) || "in_transit";
+  const baseEvent = manualTrackingStatusLabel(normalizedStatus);
+  const description = note ? `${baseEvent} · ${String(note).trim()}` : baseEvent;
+  return {
+    number: normalizeTracking(tracking),
+    carrierName: String(carrierName || "").trim() || null,
+    latest: {
+      status: normalizedStatus,
+      subStatus: null,
+      description,
+      time: iso,
+      carrierName: String(carrierName || "").trim() || null,
+      subject: "Alta manual desde ingress",
+      sender: "Alta manual"
+    },
+    flags: {
+      isOutForDelivery: normalizedStatus === "out_for_delivery",
+      isDelivered: normalizedStatus === "delivered"
+    },
+    error: null
+  };
 }
 
 function ensureOwnerShape(store, owner) {
@@ -3080,6 +3176,8 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
   const note = String(req.body?.note || "").trim();
   const source = normalizePackageSource(getBodyOrQuery(req, "source"), DEFAULT_PACKAGE_SOURCE);
   const imapAccount = String(getBodyOrQuery(req, "imap_account") || "").trim().toLowerCase();
+  const manualStatus = normalizeManualTrackingStatus(getBodyOrQuery(req, "status") || getBodyOrQuery(req, "current_status"));
+  const manualCarrierName = String(getBodyOrQuery(req, "carrier_name") || "").trim();
   const carrierAlias = String(req.body?.carrier_alias || req.query?.carrier_alias || "").trim();
   const carrier = resolveCarrierKey(req.body?.carrier || req.query?.carrier || carrierAlias);
   const registerOnAdd = boolFromAny(getBodyOrQuery(req, "register_on_add"), source === "track17");
@@ -3121,6 +3219,7 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
     if (Number.isFinite(carrier)) nextMeta.carrier_key = carrier;
   } else if (source === "imap") {
     if (nextMeta.carrier_key !== undefined) delete nextMeta.carrier_key;
+    if (manualCarrierName) nextMeta.carrier_name_override = manualCarrierName;
     if (imapAccount && imapAccount.includes("@")) {
       nextMeta.imap_account = imapAccount;
       upsertOwnerImapAccount(o, {
@@ -3131,6 +3230,23 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
     }
   }
   setTrackingMeta(o, tracking, nextMeta);
+
+  if (source === "imap" && manualStatus) {
+    const now = new Date();
+    saveTrackingLastSnapshot(
+      o,
+      tracking,
+      buildManualTrackingSnapshot({
+        tracking,
+        status: manualStatus,
+        carrierName: manualCarrierName || String(prevMeta?.carrier_name_override || "").trim(),
+        note,
+        time: now
+      }),
+      null,
+      now
+    );
+  }
 
   let registerResult = null;
   if (registerOnAdd && source === "track17") {
@@ -3201,6 +3317,23 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
   }
 
   saveStore(store);
+  if (source === "imap" && manualStatus) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      tracking,
+      status: manualStatus,
+      carrier_name: manualCarrierName || null,
+      note: note || null
+    };
+    logAt("info", "manual_tracking_added", payload);
+    postHaAuditLogSafe("info", "manual_tracking_added", {
+      owner,
+      tracking,
+      status: manualStatus,
+      carrier_name: manualCarrierName || null
+    });
+  }
   logAt("info", "tracking_add_saved", {
     req_id: req.reqId,
     owner,
@@ -3674,6 +3807,9 @@ module.exports = {
     reconcileImapAccountOwnership,
     normalizeHaOwnerAccessEntry,
     haOwnerAccessFromHeaders,
-    filterOwnersForHaIngress
+    filterOwnersForHaIngress,
+    canViewHaIngressDebug,
+    normalizeManualTrackingStatus,
+    buildManualTrackingSnapshot
   }
 };

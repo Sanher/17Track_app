@@ -16,8 +16,10 @@
         </p>
       </div>
       <div class="hero-actions">
+        <button id="addTrackingButton" class="primary-button hero-action-button" type="button">Añadir paquete</button>
         <button id="refreshMailButton" class="ghost-button hero-action-button" type="button">Refrescar correo</button>
-        <button id="refreshButton" class="ghost-button hero-action-button" type="button">Actualiza listado</button>
+        <button id="refreshButton" class="ghost-button hero-action-button" type="button">Actualizar listado</button>
+        <button id="rawDebugButton" class="ghost-button hero-action-button hidden" type="button">Ver raw</button>
         <button id="themeToggleButton" class="ghost-button hero-action-button" type="button">Modo oscuro</button>
       </div>
     </header>
@@ -75,6 +77,55 @@
       <div class="selection-actions">
         <button id="confirmDialogCancel" class="ghost-button" value="cancel" type="submit">Cancelar</button>
         <button id="confirmDialogAccept" class="danger-button" value="accept" type="submit">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="addTrackingDialog" class="confirm-dialog">
+    <form id="addTrackingForm" class="confirm-card add-tracking-card">
+      <p class="confirm-title">Añadir paquete manual</p>
+      <p class="confirm-message">Introduce el seguimiento y, si quieres, deja carrier, estado y alias ya preparados.</p>
+      <label id="addTrackingOwnerField" class="field hidden">
+        <span>Owner</span>
+        <select id="addTrackingOwnerInput"></select>
+      </label>
+      <label class="field">
+        <span>ID de seguimiento</span>
+        <input id="addTrackingIdInput" type="text" autocomplete="off" placeholder="Ej. 1Z999AA10123456784" required>
+      </label>
+      <div class="item-grid">
+        <label class="field">
+          <span>Carrier</span>
+          <input id="addTrackingCarrierInput" type="text" autocomplete="off" placeholder="Opcional">
+        </label>
+        <label class="field">
+          <span>Estado actual</span>
+          <select id="addTrackingStatusInput">
+            <option value="in_transit" selected>Enviado</option>
+            <option value="out_for_delivery">En reparto</option>
+            <option value="delivered">Entregado</option>
+            <option value="info_received">Pedido creado</option>
+          </select>
+        </label>
+      </div>
+      <label class="field">
+        <span>Alias</span>
+        <input id="addTrackingAliasInput" type="text" autocomplete="off" placeholder="Opcional">
+      </label>
+      <div class="selection-actions">
+        <button id="addTrackingCancelButton" class="ghost-button" type="button">Cancelar</button>
+        <button id="addTrackingSaveButton" class="primary-button" type="submit">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="rawDebugDialog" class="confirm-dialog">
+    <form class="confirm-card raw-debug-card" method="dialog">
+      <p class="confirm-title">Datos raw</p>
+      <p class="confirm-message">Vista raw del owner `david` para depuración desde ingress.</p>
+      <pre id="rawDebugOutput" class="raw-debug-output"></pre>
+      <div class="selection-actions">
+        <button id="rawDebugCloseButton" class="ghost-button" type="submit">Cerrar</button>
       </div>
     </form>
   </dialog>

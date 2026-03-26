@@ -1,4 +1,4 @@
-# 17Track App
+# Paquetes App
 
 Servidor Node.js para gestionar paquetes por owner (por ejemplo `owner_a` y `owner_b`) y exponer una API REST pensada para integrarse con Home Assistant.
 
@@ -152,7 +152,6 @@ Ejemplo cuenta con filtro "solo Amazon para Mislata":
 
 - `GET /health`
 - `GET /api/_build`
-- `GET /api/carriers`
 - `GET /api/owner/:owner/trackings`
 - `POST /api/owner/:owner/tracking`
 - `DELETE /api/owner/:owner/tracking/:tracking`
@@ -178,7 +177,7 @@ curl http://localhost:8787/api/owner/owner_a/trackings
 # Añadir tracking
 curl -X POST http://localhost:8787/api/owner/owner_a/tracking \
   -H "Content-Type: application/json" \
-  -d '{"tracking":"PH7NAW040990190G","carrier_alias":"correos","note":"cafetera"}'
+  -d '{"tracking":"PH7NAW040990190G","note":"cafetera"}'
 
 # Añadir tracking con source imap
 curl -X POST http://localhost:8787/api/owner/owner_a/tracking \
@@ -197,12 +196,6 @@ curl -X DELETE http://localhost:8787/api/owner/owner_a/tracking/PH7NAW040990190G
 ## Persistencia
 
 El estado se guarda en `DATA_DIR/store.json`.
-
-Para purgar trackings legacy de `track17` y dejar solo `imap`:
-
-```bash
-npm run store:purge-track17
-```
 
 ## Troubleshooting de refresco
 

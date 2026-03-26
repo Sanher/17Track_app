@@ -120,6 +120,21 @@ test("ownerTrackings dedupes repeated tracking ids from legacy store data", () =
   assert.deepEqual(trackings, ["ABC123", "XYZ789"]);
 });
 
+test("trackingSource falls back to imap for legacy non-imap sources", () => {
+  const source = _test.trackingSource(
+    {
+      meta: {
+        LEGACY1: {
+          source: "legacy_disabled_source"
+        }
+      }
+    },
+    "LEGACY1"
+  );
+
+  assert.equal(source, "imap");
+});
+
 test("sanitizeStore normalizes duplicated owner keys and tracking maps", () => {
   const store = _test.sanitizeStore({
     owners: {

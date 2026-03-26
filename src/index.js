@@ -4,16 +4,12 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { readJson, writeJson, DATA_DIR } = require("./storage");
-const { getTrackInfo, register, normalizeGetTrackInfoResponse } = require("./track17");
-const { CARRIERS } = require("./carriers");
 
 const STORE_FILE = "store.json";
 const APP_LOG_LEVEL = "info";
 const LOG_LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const APP_VERSION = `v${String(require("../package.json")?.version || "0.0.0")}`;
-// v2 mode: IMAP-only source is always active; 17Track source is disabled.
-const TRACK17_ENABLED = false;
-const PACKAGE_SOURCES = TRACK17_ENABLED ? new Set(["track17", "imap"]) : new Set(["imap"]);
+const PACKAGE_SOURCES = new Set(["imap"]);
 const DEFAULT_PACKAGE_SOURCE = "imap";
 const APP_JSON_LIMIT = String(process.env.APP_JSON_LIMIT || "256kb").trim();
 const APP_API_KEY = String(process.env.APP_API_KEY || "").trim();
@@ -68,10 +64,10 @@ function localIsoWithOffset(d = new Date()) {
  *       meta: {
  *         "PH7...": {
  *           note: "Amazon - regalo",       // free text shown in status lines
- *           delivered_override: false       // OPTIONAL: force delivered true/false. If undefined, use 17Track flags.
+ *           delivered_override: false       // OPTIONAL: force delivered true/false. If undefined, use flags from the latest snapshot.
  *         }
  *       },
- *       // last holds the latest normalized 17Track status per tracking
+ *       // last holds the latest normalized status per tracking
  *       last: {
  *         "PH7...": {
  *           number: "PH7...",
@@ -838,55 +834,6 @@ app.post("/api/telegram/tracking/:owner/:tracking/not_package", (req, res) => {
   return res.json(result);
 });
 
-// Carriers live in ./carriers.js for easier maintenance (names + keys).
-// CARRIERS: { alias: { key, name }, ... }
-const CARRIERS_MAP = Object.fromEntries(
-  Object.entries(CARRIERS).map(([alias, v]) => [alias, v.key])
-);
-
-// Expose the full carriers object so clients can show friendly names.
-app.get("/api/carriers", (_req, res) => res.json({ carriers: CARRIERS }));
-
-const TRACK17_CARRIERS_CSV_URL = "https://res.17track.net/asset/carrier/info/apicarrier.all.csv";
-const CARRIERS_17TRACK_CACHE_TTL_MS = Number(process.env.CARRIERS_17TRACK_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
-const CARRIERS_17TRACK_FETCH_TIMEOUT_MS = Number(process.env.CARRIERS_17TRACK_FETCH_TIMEOUT_MS || 12000);
-const carriers17TrackCache = {
-  fetched_at: null,
-  items: [],
-  loading: null
-};
-
-function normalizeAliasText(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
-
-function parseCsvLine(line) {
-  const out = [];
-  let cur = "";
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === "\"") {
-      if (inQuotes && line[i + 1] === "\"") {
-        cur += "\"";
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (ch === "," && !inQuotes) {
-      out.push(cur);
-      cur = "";
-    } else {
-      cur += ch;
-    }
-  }
-  out.push(cur);
-  return out;
-}
-
 function normalizePackageSource(sourceRaw, fallback = DEFAULT_PACKAGE_SOURCE) {
   const s = String(sourceRaw || "").trim().toLowerCase();
   if (!s) return fallback;
@@ -987,148 +934,6 @@ function inferImapProvider(email) {
   return "generic";
 }
 
-function parseTrack17CarriersCsv(csvRaw) {
-  const lines = String(csvRaw || "")
-    .replace(/^\uFEFF/, "")
-    .split(/\r?\n/)
-    .map((x) => x.trim())
-    .filter(Boolean);
-  if (lines.length <= 1) return [];
-
-  const items = [];
-  for (let i = 1; i < lines.length; i++) {
-    const row = parseCsvLine(lines[i]);
-    if (!row.length) continue;
-    const keyNum = Number(row[0]);
-    const nameEn = String(row[1] || "").trim();
-    const nameCn = String(row[2] || "").trim();
-    const nameHk = String(row[3] || "").trim();
-    const url = String(row[4] || "").trim();
-    if (!Number.isFinite(keyNum) || !nameEn) continue;
-
-    const alias = normalizeAliasText(nameEn);
-    const baseAlias = normalizeAliasText(
-      nameEn
-        .replace(/\([^)]*\)/g, " ")
-        .split(/[\s-]+/)[0]
-    );
-
-    items.push({
-      key: keyNum,
-      alias,
-      base_alias: baseAlias,
-      name_en: nameEn,
-      name_cn: nameCn || null,
-      name_hk: nameHk || null,
-      url: url || null
-    });
-  }
-  return items;
-}
-
-async function load17TrackCarriersCached(forceRefresh = false) {
-  const now = Date.now();
-  const ttlMs = Number.isFinite(CARRIERS_17TRACK_CACHE_TTL_MS) && CARRIERS_17TRACK_CACHE_TTL_MS > 0
-    ? CARRIERS_17TRACK_CACHE_TTL_MS
-    : 24 * 60 * 60 * 1000;
-
-  const cacheValid = carriers17TrackCache.fetched_at && (now - carriers17TrackCache.fetched_at.getTime() < ttlMs);
-  if (!forceRefresh && cacheValid && carriers17TrackCache.items.length > 0) {
-    return carriers17TrackCache.items;
-  }
-
-  if (carriers17TrackCache.loading) {
-    return carriers17TrackCache.loading;
-  }
-
-  carriers17TrackCache.loading = (async () => {
-    const timeoutMs = Number.isFinite(CARRIERS_17TRACK_FETCH_TIMEOUT_MS) && CARRIERS_17TRACK_FETCH_TIMEOUT_MS > 0
-      ? CARRIERS_17TRACK_FETCH_TIMEOUT_MS
-      : 12000;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const r = await fetch(TRACK17_CARRIERS_CSV_URL, { signal: controller.signal });
-      if (!r.ok) {
-        throw new Error(`carriers_csv_fetch_failed_${r.status}`);
-      }
-      const txt = await r.text();
-      const parsed = parseTrack17CarriersCsv(txt);
-      carriers17TrackCache.items = parsed;
-      carriers17TrackCache.fetched_at = new Date();
-      return parsed;
-    } catch (e) {
-      if (carriers17TrackCache.items.length > 0) {
-        logAt("warn", "carriers_cached_source_failed_using_stale", {
-          error: String(e.message || e),
-          stale_items: carriers17TrackCache.items.length
-        });
-        return carriers17TrackCache.items;
-      }
-      throw e;
-    } finally {
-      clearTimeout(timeout);
-    }
-  })();
-
-  try {
-    return await carriers17TrackCache.loading;
-  } finally {
-    carriers17TrackCache.loading = null;
-  }
-}
-
-app.get("/api/carriers/17track_cached", async (req, res) => {
-  if (!TRACK17_ENABLED) {
-    return res.status(410).json({
-      ok: false,
-      error: "track17_disabled",
-      message: "Endpoint desactivado en modo IMAP-only."
-    });
-  }
-
-  const qRaw = String(req.query?.q || "").trim();
-  const q = normalizeAliasText(qRaw);
-  const rawLimit = Number(req.query?.limit);
-  const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(500, rawLimit)) : 100;
-  const refresh = String(req.query?.refresh || "").toLowerCase() === "true";
-  const ttlMs = Number.isFinite(CARRIERS_17TRACK_CACHE_TTL_MS) && CARRIERS_17TRACK_CACHE_TTL_MS > 0
-    ? CARRIERS_17TRACK_CACHE_TTL_MS
-    : 24 * 60 * 60 * 1000;
-
-  try {
-    const items = await load17TrackCarriersCached(refresh);
-    let filtered = items;
-    if (q) {
-      filtered = items.filter((it) =>
-        it.alias.includes(q) ||
-        it.base_alias.includes(q) ||
-        normalizeAliasText(it.name_en).includes(q)
-      );
-    }
-
-    const out = filtered
-      .sort((a, b) => a.key - b.key)
-      .slice(0, limit);
-
-    return res.json({
-      ok: true,
-      source: "17track_csv_cached",
-      query: qRaw || null,
-      total: filtered.length,
-      count: out.length,
-      cache_ttl_ms: ttlMs,
-      fetched_at: carriers17TrackCache.fetched_at ? carriers17TrackCache.fetched_at.toISOString() : null,
-      items: out
-    });
-  } catch (e) {
-    return res.status(502).json({
-      ok: false,
-      error: "carriers_source_unavailable",
-      message: String(e.message || e)
-    });
-  }
-});
 // ---- Background scheduler (Step 3) ----
 // Enable with: BG_ENABLED=1 (also accepts true/yes/on)
 // Interval: BG_INTERVAL_MIN (default 15)
@@ -1267,7 +1072,6 @@ function validateStartupConfig() {
     delivered_retention_days: DELIVERED_RETENTION_DAYS,
     ha_configured: !!(HA_URL && HA_TOKEN),
     json_limit: APP_JSON_LIMIT,
-    track17_enabled: TRACK17_ENABLED,
     ha_audit_log_enabled: HA_AUDIT_LOG_ENABLED,
     ha_audit_log_level: HA_AUDIT_LOG_LEVEL,
     ha_user_owners_file: HA_USER_OWNERS_FILE || null,
@@ -1304,28 +1108,6 @@ function buildOwnerDeliveryMessage(ownerKey, newOnes) {
 
 async function refreshTrackingBySource(o, ownerKey, tn, now = new Date()) {
   const source = trackingSource(o, tn);
-
-  if (source === "track17") {
-    try {
-      const carrier = trackingPreferredCarrier(o, tn);
-      const { json } = await getTrackInfo(tn, carrier);
-      const norm = normalizeGetTrackInfoResponse(json);
-      const one = norm.ok && Array.isArray(norm.accepted) && norm.accepted[0] ? norm.accepted[0] : null;
-      saveTrackingLastSnapshot(o, tn, one, norm.ok ? null : norm.error, now);
-      return {
-        tracking: tn,
-        source,
-        ok: norm.ok,
-        one,
-        rejected: norm.rejected,
-        errors: norm.errors
-      };
-    } catch (e) {
-      const err = String(e.message || e);
-      saveTrackingLastSnapshot(o, tn, null, err, now);
-      return { tracking: tn, source, ok: false, error: err };
-    }
-  }
 
   if (source === "imap") {
     const last = ownerLastMap(o);
@@ -1945,24 +1727,6 @@ function ownerIsEmpty(o) {
   return tCount === 0 && mCount === 0 && lCount === 0 && aCount === 0 && rCount === 0;
 }
 
-function resolveCarrierKey(aliasOrKey) {
-  const raw = String(aliasOrKey || "").trim();
-  if (!raw) return undefined;
-  if (/^\d+$/.test(raw)) return Number(raw);
-  const alias = raw.toLowerCase();
-  return CARRIERS_MAP?.[alias];
-}
-
-function metaCarrierKey(meta) {
-  const n = Number(meta?.carrier_key);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-function trackingPreferredCarrier(o, tn) {
-  const meta = getTrackingMeta(o, tn);
-  return metaCarrierKey(meta);
-}
-
 function trackingSource(o, tn) {
   const meta = getTrackingMeta(o, tn);
   return normalizePackageSource(meta?.source, DEFAULT_PACKAGE_SOURCE) || DEFAULT_PACKAGE_SOURCE;
@@ -1996,7 +1760,6 @@ function serializeTrackingItem(owner, o, tn) {
     carrier_name: effectiveCarrierName(one, meta),
     carrier_name_detected: String(one?.carrierName || "").trim() || null,
     carrier_name_override: String(meta?.carrier_name_override || "").trim() || null,
-    carrier_override: metaCarrierKey(meta) ?? null,
     delivered_override: deliveredOverrideValue(meta),
     delivered_effective: effectiveIsDelivered(one, meta),
     delivered_at: String(meta?.delivered_at || "").trim() || null,
@@ -2814,7 +2577,6 @@ app.get("/api/owner/:owner/resolve", (req, res) => {
     carrier_name: item.carrier_name,
     carrier_name_detected: item.carrier_name_detected,
     carrier_name_override: item.carrier_name_override,
-    carrier_override: item.carrier_override,
     delivered_override: item.delivered_override,
     delivered_effective: item.delivered_effective,
     out_for_delivery: item.out_for_delivery,
@@ -3180,10 +2942,6 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
   const imapAccount = String(getBodyOrQuery(req, "imap_account") || "").trim().toLowerCase();
   const manualStatus = normalizeManualTrackingStatus(getBodyOrQuery(req, "status") || getBodyOrQuery(req, "current_status"));
   const manualCarrierName = String(getBodyOrQuery(req, "carrier_name") || "").trim();
-  const carrierAlias = String(req.body?.carrier_alias || req.query?.carrier_alias || "").trim();
-  const carrier = resolveCarrierKey(req.body?.carrier || req.query?.carrier || carrierAlias);
-  const registerOnAdd = boolFromAny(getBodyOrQuery(req, "register_on_add"), source === "track17");
-  const registerStrict = boolFromAny(getBodyOrQuery(req, "register_strict"), false);
   if (source === null) {
     const payload = {
       req_id: req.reqId,
@@ -3201,10 +2959,7 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
     owner,
     tracking,
     source,
-    imap_account: imapAccount || null,
-    carrier: carrier ?? null,
-    register_on_add: registerOnAdd,
-    register_strict: registerStrict
+    imap_account: imapAccount || null
   });
 
   if (!owner || !tracking) return res.status(400).json({ error: "owner y tracking son obligatorios" });
@@ -3216,24 +2971,18 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
   const prevMeta = getTrackingMeta(o, tracking);
   const nextMeta = { ...prevMeta, source };
   if (note) nextMeta.note = note;
-  if (source === "track17") {
-    if (nextMeta.imap_account !== undefined) delete nextMeta.imap_account;
-    if (Number.isFinite(carrier)) nextMeta.carrier_key = carrier;
-  } else if (source === "imap") {
-    if (nextMeta.carrier_key !== undefined) delete nextMeta.carrier_key;
-    if (manualCarrierName) nextMeta.carrier_name_override = manualCarrierName;
-    if (imapAccount && imapAccount.includes("@")) {
-      nextMeta.imap_account = imapAccount;
-      upsertOwnerImapAccount(o, {
-        email: imapAccount,
-        provider: inferImapProvider(imapAccount),
-        enabled: true
-      });
-    }
+  if (manualCarrierName) nextMeta.carrier_name_override = manualCarrierName;
+  if (imapAccount && imapAccount.includes("@")) {
+    nextMeta.imap_account = imapAccount;
+    upsertOwnerImapAccount(o, {
+      email: imapAccount,
+      provider: inferImapProvider(imapAccount),
+      enabled: true
+    });
   }
   setTrackingMeta(o, tracking, nextMeta);
 
-  if (source === "imap" && manualStatus) {
+  if (manualStatus) {
     const now = new Date();
     saveTrackingLastSnapshot(
       o,
@@ -3250,76 +2999,8 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
     );
   }
 
-  let registerResult = null;
-  if (registerOnAdd && source === "track17") {
-    try {
-      const r = await register(tracking, carrier);
-      const apiCode = Number(r?.json?.code);
-      const accepted = Array.isArray(r?.json?.data?.accepted) ? r.json.data.accepted.length : 0;
-      const rejected = Array.isArray(r?.json?.data?.rejected) ? r.json.data.rejected.length : 0;
-      const registerOk = apiCode === 0 && rejected === 0;
-      registerResult = {
-        ok: registerOk,
-        carrier: carrier ?? null,
-        status: r?.status ?? null,
-        api_code: Number.isFinite(apiCode) ? apiCode : null,
-        accepted,
-        rejected,
-        response: r?.json ?? null
-      };
-      if (!registerOk && registerStrict) {
-        return res.status(502).json({
-          ok: false,
-          owner,
-          tracking,
-          note,
-          error: "register_rejected",
-          register: registerResult
-        });
-      }
-    } catch (e) {
-      const err = String(e.message || e);
-      registerResult = { ok: false, carrier: carrier ?? null, error: err };
-      logAt("error", "tracking_register_failed", {
-        req_id: req.reqId,
-        owner,
-        tracking,
-        carrier: carrier ?? null,
-        error: err
-      });
-      if (registerStrict) {
-        return res.status(502).json({
-          ok: false,
-          owner,
-          tracking,
-          note,
-          error: "register_failed",
-          register: registerResult
-        });
-      }
-    }
-  } else if (registerOnAdd && source !== "track17") {
-    registerResult = {
-      ok: false,
-      skipped: true,
-      source,
-      reason: "source_not_registerable"
-    };
-    logAt("warn", "tracking_register_skipped_source_not_registerable", {
-      req_id: req.reqId,
-      owner,
-      tracking,
-      source
-    });
-    postHaAuditLogSafe("warn", "tracking_register_skipped_source_not_registerable", {
-      owner,
-      tracking,
-      source
-    });
-  }
-
   saveStore(store);
-  if (source === "imap" && manualStatus) {
+  if (manualStatus) {
     const payload = {
       req_id: req.reqId,
       owner,
@@ -3340,16 +3021,15 @@ app.post("/api/owner/:owner/tracking", async (req, res) => {
     req_id: req.reqId,
     owner,
     tracking,
-    source,
-    register_ok: registerResult?.ok ?? null
+    source
   });
-  res.json({ ok: true, owner, tracking, source, note, register: registerResult });
+  res.json({ ok: true, owner, tracking, source, note });
 });
 
 // Set or clear a manual delivered override for a tracking number.
 // Body: { delivered: true|false|null }
-// - true/false forces the delivered flag (useful when 17Track is wrong)
-// - null (or missing) clears the override and returns to 17Track-derived flags
+// - true/false forces the delivered flag when the detected state is wrong
+// - null (or missing) clears the override and returns to the latest stored flags
 app.post("/api/owner/:owner/tracking/:tracking/override", (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const tracking = String(req.params.tracking || "").trim().toUpperCase();
@@ -3416,88 +3096,6 @@ app.post("/api/owner/:owner/tracking/:tracking/not_package", (req, res) => {
   return res.json(result);
 });
 
-// Set or clear a preferred carrier for a tracking.
-// Body:
-// - { carrier: 100189 } or { carrier_alias: "gls_es" } => set preferred carrier
-// - { carrier: null } or { carrier_alias: "" } => clear preferred carrier
-app.post("/api/owner/:owner/tracking/:tracking/carrier", async (req, res) => {
-  const owner = String(req.params.owner || "").trim().toLowerCase();
-  const tracking = normalizeTracking(req.params.tracking);
-
-  const bodyCarrierRaw = req.body?.carrier;
-  const bodyAliasRaw = req.body?.carrier_alias;
-  const clearRequested =
-    bodyCarrierRaw === null ||
-    (bodyCarrierRaw !== undefined && String(bodyCarrierRaw).trim() === "") ||
-    (bodyAliasRaw !== undefined && String(bodyAliasRaw).trim() === "");
-
-  const resolvedCarrier = clearRequested ? undefined : resolveCarrierKey(
-    bodyCarrierRaw !== undefined ? bodyCarrierRaw : bodyAliasRaw
-  );
-  if (!clearRequested && !Number.isFinite(resolvedCarrier)) {
-    return res.status(400).json({
-      ok: false,
-      owner,
-      tracking,
-      error: "invalid_carrier",
-      message: "Usa carrier numérico o alias válido (ej: gls_es, dpd, tipsa, asmred)."
-    });
-  }
-
-  const store = loadStore();
-  const o = ensureOwnerShape(store, owner);
-  if (!o.trackings.includes(tracking)) o.trackings.push(tracking);
-  const source = trackingSource(o, tracking);
-  if (source !== "track17") {
-    const payload = { req_id: req.reqId, owner, tracking, source };
-    logAt("warn", "tracking_carrier_update_blocked_non_track17", payload);
-    postHaAuditLogSafe("warn", "tracking_carrier_update_blocked_non_track17", payload);
-    return res.status(400).json({
-      ok: false,
-      owner,
-      tracking,
-      source,
-      error: "carrier_only_track17"
-    });
-  }
-
-  const prev = getTrackingMeta(o, tracking);
-  const next = { ...prev };
-  if (clearRequested) delete next.carrier_key;
-  else next.carrier_key = resolvedCarrier;
-  setTrackingMeta(o, tracking, next);
-
-  let refreshed = false;
-  let refresh_error = null;
-  let refresh_one = null;
-  const rr = await refreshTrackingBySource(o, owner, tracking, new Date());
-  refreshed = !!rr?.ok;
-  refresh_error = rr?.ok ? null : String(rr?.error || "refresh_failed");
-  refresh_one = rr?.one ? shortOne(rr.one) : null;
-
-  saveStore(store);
-  logAt("info", "tracking_carrier_updated", {
-    req_id: req.reqId,
-    owner,
-    tracking,
-    source,
-    carrier_override: clearRequested ? null : resolvedCarrier,
-    refreshed,
-    refresh_error
-  });
-
-  return res.json({
-    ok: true,
-    owner,
-    tracking,
-    source,
-    carrier_override: clearRequested ? null : resolvedCarrier,
-    refreshed,
-    refresh_error,
-    one: refresh_one
-  });
-});
-
 app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
   const owner = String(req.params.owner || "").trim().toLowerCase();
   const tracking = normalizeTracking(req.params.tracking);
@@ -3530,63 +3128,6 @@ app.delete("/api/owner/:owner/tracking/:tracking", (req, res) => {
     removed_meta: removal.removed_meta,
     removed_last: removal.removed_last
   });
-});
-
-app.post("/api/track/refresh", async (req, res) => {
-  const number = String(req.body?.tracking || "").trim().toUpperCase();
-  const carrier = req.body?.carrier ? Number(req.body.carrier) : undefined;
-
-  if (!number) return res.status(400).json({ error: "tracking es obligatorio" });
-
-  try {
-    const { json } = await getTrackInfo(number, carrier);
-    logAt("info", "track_refresh_done", {
-      req_id: req.reqId,
-      tracking: number,
-      carrier: carrier ?? null,
-      api_code: json?.code ?? null
-    });
-    return res.json(normalizeGetTrackInfoResponse(json));
-  } catch (e) {
-    logAt("error", "track_refresh_failed", {
-      req_id: req.reqId,
-      tracking: number,
-      carrier: carrier ?? null,
-      error: String(e.message || e)
-    });
-    return res.status(500).json({ error: String(e.message || e) });
-  }
-});
-
-app.post("/api/track/register", async (req, res) => {
-  const number = String(req.body?.tracking || "").trim().toUpperCase();
-  const carrier = req.body?.carrier ? Number(req.body.carrier) : undefined;
-
-  if (!number) return res.status(400).json({ error: "tracking es obligatorio" });
-
-  try {
-    const r1 = await register(number, carrier);
-    const r2 = await getTrackInfo(number, carrier);
-    logAt("info", "track_register_done", {
-      req_id: req.reqId,
-      tracking: number,
-      carrier: carrier ?? null,
-      register_api_code: r1?.json?.code ?? null,
-      refresh_api_code: r2?.json?.code ?? null
-    });
-    return res.json({
-      register: r1.json,
-      refresh: normalizeGetTrackInfoResponse(r2.json)
-    });
-  } catch (e) {
-    logAt("error", "track_register_failed", {
-      req_id: req.reqId,
-      tracking: number,
-      carrier: carrier ?? null,
-      error: String(e.message || e)
-    });
-    return res.status(500).json({ error: String(e.message || e) });
-  }
 });
 
 app.get("/api/owner/:owner/status", (req, res) => {
@@ -3775,7 +3316,7 @@ function startBackgroundIfEnabled() {
 function startServer(listenPort = process.env.PORT || 8787) {
   validateStartupConfig();
   return app.listen(listenPort, () => {
-    console.log(`17Track app listening on ${listenPort}`);
+    console.log(`Paquetes app listening on ${listenPort}`);
     console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
     console.log(`[APP] log level: ${APP_LOG_LEVEL}`);
     console.log(`[APP] version: ${APP_VERSION}`);
@@ -3805,6 +3346,7 @@ module.exports = {
     triggerManualImapRefresh,
     splitLogLines,
     ownerTrackings,
+    trackingSource,
     sanitizeStore,
     reconcileImapAccountOwnership,
     normalizeHaOwnerAccessEntry,

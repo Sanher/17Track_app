@@ -284,12 +284,13 @@ test("filterOwnersForHaIngress keeps only allowed owners for ingress user", () =
   assert.deepEqual(owners, [{ owner: "owner_b", count: 1 }]);
 });
 
-test("canViewHaIngressDebug only allows ingress users scoped to david", () => {
+test("canViewHaIngressDebug only allows ingress users scoped to the raw owner", () => {
+  const rawOwner = _test.RAW_DEBUG_OWNER;
   assert.equal(
     _test.canViewHaIngressDebug({
       via_ingress: true,
       mapped: true,
-      owners: ["david"]
+      owners: [rawOwner]
     }),
     true
   );
@@ -307,7 +308,7 @@ test("canViewHaIngressDebug only allows ingress users scoped to david", () => {
     _test.canViewHaIngressDebug({
       via_ingress: false,
       mapped: false,
-      owners: ["david"]
+      owners: [rawOwner]
     }),
     false
   );

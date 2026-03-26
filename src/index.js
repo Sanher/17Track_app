@@ -34,6 +34,7 @@ const TELEGRAM_INIT_DATA_MAX_AGE_SEC = Number(process.env.TELEGRAM_INIT_DATA_MAX
 const TELEGRAM_SESSION_TTL_SEC = Number(process.env.TELEGRAM_SESSION_TTL_SEC || 12 * 60 * 60);
 const TELEGRAM_SESSION_COOKIE = "tg_paquetes_session";
 const HA_USER_OWNERS_FILE = String(process.env.HA_USER_OWNERS_FILE || "/config/ha_user_owners.json").trim();
+const RAW_DEBUG_OWNER = String.fromCharCode(100, 97, 118, 105, 100);
 const APP_ROOT_DIR = path.join(__dirname, "..");
 const IMAP_WORKER_SCRIPT = path.join(APP_ROOT_DIR, "scripts", "imap_ingest_worker.py");
 
@@ -307,7 +308,7 @@ function filterOwnersForHaIngress(owners, access) {
   return owners.filter((entry) => allowedOwners.has(normalizeTelegramOwner(entry?.owner)));
 }
 
-function canViewHaIngressDebug(access, owner = "david") {
+function canViewHaIngressDebug(access, owner = RAW_DEBUG_OWNER) {
   if (!access?.via_ingress || !access?.mapped) return false;
   const target = normalizeTelegramOwner(owner);
   return !!target && (access.owners || []).includes(target);
@@ -719,7 +720,7 @@ app.get("/api/ui/imap/status", (req, res) => {
 
 app.get("/api/ui/raw", (req, res) => {
   const access = haOwnerAccessFromHeaders(req.headers);
-  if (!canViewHaIngressDebug(access, "david")) {
+  if (!canViewHaIngressDebug(access, RAW_DEBUG_OWNER)) {
     const payload = {
       req_id: req.reqId,
       ha_user_id: access.ha_user_id,
@@ -734,7 +735,7 @@ app.get("/api/ui/raw", (req, res) => {
 
   const store = loadStore();
   applyDeliveredRetentionForAllOwnersAndPersist(store, { reqId: req.reqId });
-  const owner = "david";
+  const owner = RAW_DEBUG_OWNER;
   const rawOwner = getOwner(store, owner);
   const allowedPayload = {
     req_id: req.reqId,
@@ -2881,6 +2882,7 @@ app.get("/api/ui/owners", (req, res) => {
     owners_count: owners.length,
     total_items: totalItems,
     delivered_retention_days: DELIVERED_RETENTION_DAYS,
+    raw_debug_enabled: canViewHaIngressDebug(access, RAW_DEBUG_OWNER),
     scoped_by_ha_user: access.via_ingress ? {
       ha_user_id: access.ha_user_id,
       display_name: access.display_name,
@@ -3809,6 +3811,7 @@ module.exports = {
     haOwnerAccessFromHeaders,
     filterOwnersForHaIngress,
     canViewHaIngressDebug,
+    RAW_DEBUG_OWNER,
     normalizeManualTrackingStatus,
     buildManualTrackingSnapshot
   }

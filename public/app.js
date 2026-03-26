@@ -6,7 +6,8 @@ const state = {
   selectedKeys: new Set(),
   theme: localStorage.getItem("paquetes_app_theme") || "",
   scopedByHaUser: null,
-  refreshPollId: null
+  refreshPollId: null,
+  rawDebugEnabled: false
 };
 
 const heroText = document.getElementById("heroText");
@@ -135,14 +136,9 @@ function primaryIngressOwner() {
   return normalized[0] || "";
 }
 
-function canViewRawDebug() {
-  const scopedOwners = Array.isArray(state.scopedByHaUser?.owners) ? state.scopedByHaUser.owners : [];
-  return scopedOwners.map((owner) => String(owner || "").trim().toLowerCase()).includes("david");
-}
-
 function updateDebugButtonVisibility() {
   if (!rawDebugButton) return;
-  rawDebugButton.classList.toggle("hidden", !canViewRawDebug());
+  rawDebugButton.classList.toggle("hidden", !state.rawDebugEnabled);
 }
 
 function setStatus(message, type = "info") {
@@ -687,6 +683,7 @@ async function loadOwners() {
     const payload = await apiFetch("/api/ui/owners");
     state.owners = Array.isArray(payload.owners) ? payload.owners : [];
     state.scopedByHaUser = payload.scoped_by_ha_user || null;
+    state.rawDebugEnabled = payload.raw_debug_enabled === true;
     syncSelectionToKnownItems();
     updateHeroText();
     updateDebugButtonVisibility();

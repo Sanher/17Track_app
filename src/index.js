@@ -16,7 +16,7 @@ const APP_API_KEY = String(process.env.APP_API_KEY || "").trim();
 const HA_AUDIT_LOG_ENABLED_RAW = process.env.HA_AUDIT_LOG_ENABLED;
 const HA_AUDIT_LOG_ENABLED = boolFromAny(HA_AUDIT_LOG_ENABLED_RAW, false);
 const HA_AUDIT_LOG_LEVEL = String(process.env.HA_AUDIT_LOG_LEVEL || "info").trim().toLowerCase();
-const HA_AUDIT_LOG_NAME = String(process.env.HA_AUDIT_LOG_NAME || "Paquetes App").trim();
+const HA_AUDIT_LOG_NAME = String(process.env.HA_AUDIT_LOG_NAME || "HA IMAP Tracker").trim();
 const HA_AUDIT_LOG_ENTITY_ID = String(process.env.HA_AUDIT_LOG_ENTITY_ID || "").trim();
 const PUBLIC_DIR = path.join(__dirname, "..", "public");
 const TELEGRAM_PUBLIC_DIR = path.join(PUBLIC_DIR, "telegram");
@@ -138,7 +138,7 @@ async function postHaAuditLog(level, message, extra = {}) {
   const sanitized = sanitizeAuditExtra(extra);
   const details = Object.keys(sanitized).length ? ` | ${JSON.stringify(sanitized)}` : "";
   const logbookPayload = {
-    name: HA_AUDIT_LOG_NAME || "Paquetes App",
+    name: HA_AUDIT_LOG_NAME || "HA IMAP Tracker",
     message: `[${level}] ${message}${details}`.slice(0, 1024)
   };
   if (HA_AUDIT_LOG_ENTITY_ID) logbookPayload.entity_id = HA_AUDIT_LOG_ENTITY_ID;
@@ -3316,7 +3316,7 @@ function startBackgroundIfEnabled() {
 function startServer(listenPort = process.env.PORT || 8787) {
   validateStartupConfig();
   return app.listen(listenPort, () => {
-    console.log(`Paquetes app listening on ${listenPort}`);
+    console.log(`HA IMAP Tracker listening on ${listenPort}`);
     console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
     console.log(`[APP] log level: ${APP_LOG_LEVEL}`);
     console.log(`[APP] version: ${APP_VERSION}`);

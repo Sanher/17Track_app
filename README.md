@@ -1,4 +1,4 @@
-# Paquetes App
+# HA IMAP Tracker
 
 Servidor Node.js para gestionar paquetes por owner (por ejemplo `owner_a` y `owner_b`) y exponer una API REST pensada para integrarse con Home Assistant.
 
@@ -70,7 +70,7 @@ Integración con Home Assistant (notificaciones):
 - `HA_SCRIPT` (default `jarvis_17track_notify`)
 - `HA_AUDIT_LOG_ENABLED` (`1|true|yes|on`) para enviar eventos de auditoría al logbook de HA.
 - `HA_AUDIT_LOG_LEVEL`: `debug|info|warn|error` (default `warn`).
-- `HA_AUDIT_LOG_NAME`: nombre en logbook (default `Paquetes App`).
+- `HA_AUDIT_LOG_NAME`: nombre en logbook (default `HA IMAP Tracker`).
 - `HA_AUDIT_LOG_ENTITY_ID`: opcional, para asociar entradas a una entidad.
 
 ## Worker IMAP

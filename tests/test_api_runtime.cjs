@@ -232,14 +232,14 @@ test("mark not package removes tracking and stores ignore rule terms", () => {
 test("normalizeHaOwnerAccessEntry normalizes HA ingress access rows", () => {
   const entry = _test.normalizeHaOwnerAccessEntry({
     ha_user_id: "user-123",
-    owners: [" David ", "mireia", "david"],
+    owners: [" Owner_A ", "owner_b", "owner_a"],
     active: true,
     label: "Familia"
   });
 
   assert.deepEqual(entry, {
     ha_user_id: "user-123",
-    owners: ["david", "mireia"],
+    owners: ["owner_a", "owner_b"],
     label: "Familia",
     active: true
   });
@@ -252,8 +252,8 @@ test("haOwnerAccessFromHeaders resolves ingress user owner scope", () => {
       "x-remote-user-display-name": "Usuario HA"
     },
     [
-      { ha_user_id: "ha-user-a", owners: ["david"] },
-      { ha_user_id: "ha-user-b", owners: ["mireia"] }
+      { ha_user_id: "ha-user-a", owners: ["owner_a"] },
+      { ha_user_id: "ha-user-b", owners: ["owner_b"] }
     ]
   );
 
@@ -262,7 +262,7 @@ test("haOwnerAccessFromHeaders resolves ingress user owner scope", () => {
     mapped: true,
     ha_user_id: "ha-user-a",
     display_name: "Usuario HA",
-    owners: ["david"],
+    owners: ["owner_a"],
     label: null
   });
 });
@@ -270,18 +270,18 @@ test("haOwnerAccessFromHeaders resolves ingress user owner scope", () => {
 test("filterOwnersForHaIngress keeps only allowed owners for ingress user", () => {
   const owners = _test.filterOwnersForHaIngress(
     [
-      { owner: "david", count: 2 },
-      { owner: "mireia", count: 1 }
+      { owner: "owner_a", count: 2 },
+      { owner: "owner_b", count: 1 }
     ],
     {
       via_ingress: true,
       mapped: true,
       ha_user_id: "ha-user-a",
-      owners: ["mireia"]
+      owners: ["owner_b"]
     }
   );
 
-  assert.deepEqual(owners, [{ owner: "mireia", count: 1 }]);
+  assert.deepEqual(owners, [{ owner: "owner_b", count: 1 }]);
 });
 
 test("telegram init data validates signed user payload", () => {

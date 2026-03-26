@@ -10,9 +10,28 @@
   --ok: #2e7b59;
   --warn: #c58a1a;
   --done: #4a6a64;
+  --danger: #8c3112;
+  --button-muted: rgba(24, 34, 32, 0.72);
   --radius-lg: 22px;
   --radius-md: 14px;
   --shadow: 0 18px 45px rgba(17, 27, 25, 0.12);
+}
+
+:root[data-theme="dark"] {
+  --bg: #0f1416;
+  --bg-2: #182125;
+  --panel: rgba(24, 31, 34, 0.9);
+  --ink: #edf2ef;
+  --muted: #a2b1ab;
+  --line: rgba(237, 242, 239, 0.12);
+  --accent: #d07047;
+  --accent-2: #f0b295;
+  --ok: #79c39d;
+  --warn: #dbb04e;
+  --done: #8fa6a0;
+  --danger: #ff9e79;
+  --button-muted: rgba(237, 242, 239, 0.74);
+  --shadow: 0 22px 46px rgba(0, 0, 0, 0.32);
 }
 
 * {
@@ -55,13 +74,10 @@ body {
   padding: 22px 20px;
 }
 
-.eyebrow {
-  margin: 0 0 8px;
-  color: var(--accent-2);
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
+.hero-top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .hero h1 {
@@ -104,6 +120,11 @@ body {
   margin: 0;
   color: var(--muted);
   line-height: 1.45;
+}
+
+.theme-button {
+  min-height: 40px;
+  padding: 0 14px;
 }
 
 .locked-panel {
@@ -172,7 +193,8 @@ body {
 .field input,
 .field select,
 .primary-button,
-.soft-button {
+.soft-button,
+.secondary-button {
   min-height: 46px;
   border-radius: var(--radius-md);
   border: 1px solid rgba(24, 34, 32, 0.15);
@@ -205,9 +227,20 @@ body {
   background: rgba(255, 255, 255, 0.72);
 }
 
+.secondary-button {
+  padding: 0 16px;
+  font-weight: 700;
+  color: var(--ink);
+  background: rgba(24, 34, 32, 0.08);
+}
+
 .status-bar {
   color: var(--accent-2);
   font-weight: 700;
+}
+
+.status-bar.is-error {
+  color: var(--danger);
 }
 
 .hidden {
@@ -222,6 +255,11 @@ body {
 
 .card {
   padding: 16px;
+}
+
+.card[data-state="delivered"] {
+  background: color-mix(in srgb, var(--panel) 88%, var(--done) 12%);
+  border-color: color-mix(in srgb, var(--line) 68%, var(--done) 32%);
 }
 
 .card-top {
@@ -267,7 +305,7 @@ body {
 
 .pill[data-state="delivered"] {
   color: var(--done);
-  background: rgba(74, 106, 100, 0.15);
+  background: color-mix(in srgb, var(--done) 18%, transparent);
 }
 
 .facts {
@@ -297,10 +335,45 @@ body {
 
 .actions {
   margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
 }
 
-.actions .primary-button {
+.actions .primary-button,
+.actions .soft-button,
+.actions .secondary-button {
   width: 100%;
+}
+
+.not-package-button {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+}
+
+.delivered-button.secondary-button {
+  color: var(--button-muted);
+  border-color: color-mix(in srgb, var(--button-muted) 16%, var(--line));
+  background: color-mix(in srgb, var(--button-muted) 8%, var(--panel));
+}
+
+.back-to-top {
+  position: fixed;
+  right: 18px;
+  bottom: 22px;
+  z-index: 30;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, var(--accent) 28%);
+  border-radius: 999px;
+  color: #fffaf5;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
 }
 
 @media (min-width: 700px) {

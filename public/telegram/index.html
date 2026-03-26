@@ -9,7 +9,9 @@
 <body>
   <div class="shell">
     <header class="hero">
-      <p class="eyebrow">Telegram Mini App</p>
+      <div class="hero-top">
+        <button id="themeToggleButton" class="soft-button theme-button" type="button">Modo oscuro</button>
+      </div>
       <h1>Paquetes</h1>
       <p id="userMeta" class="hero-copy">Conectando...</p>
     </header>
@@ -39,8 +41,8 @@
               <span>Estado</span>
               <select id="statusFilter">
                 <option value="">Todos</option>
-                <option value="in_transit">Enviado</option>
                 <option value="out_for_delivery">En reparto</option>
+                <option value="in_transit">Enviado</option>
                 <option value="delivered">Entregado</option>
               </select>
             </label>
@@ -104,10 +106,15 @@
       </dl>
 
       <div class="actions">
-        <button class="delivered-button primary-button" type="button">Marcar delivered</button>
+        <button class="not-package-button soft-button" type="button">No es paquete</button>
+        <button class="delivered-button secondary-button" type="button">Marcar delivered</button>
       </div>
     </article>
   </template>
+
+  <button id="backToTopButton" class="back-to-top hidden" type="button" aria-label="Volver arriba">
+    Arriba
+  </button>
 
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="/telegram/app/app.js"></script>

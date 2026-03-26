@@ -310,6 +310,25 @@ class ExtractionAndAuthTests(unittest.TestCase):
         self.assertNotIn(weak_token, without_context)
         self.assertIn(weak_token, with_context)
 
+    def test_extract_tracking_numbers_accepts_weak_token_from_official_carrier_sender(self):
+        weak_token = "GLS-ES-12345678"
+        found = worker.extract_tracking_numbers(
+            subject=f"Referencia {weak_token}",
+            body="mensaje breve sin palabras de envio",
+            sender="GLS <noreply@gls-group.eu>",
+        )
+
+        self.assertIn(weak_token, found)
+
+    def test_extract_tracking_numbers_accepts_amazon_order_id_from_official_sender(self):
+        found = worker.extract_tracking_numbers(
+            subject="Pedido: producto de prueba",
+            body="Gracias por tu pedido. Pedido n.º 171-6273296-7097149",
+            sender="Amazon.es <auto-confirm@amazon.es>",
+        )
+
+        self.assertIn("171-6273296-7097149", found)
+
     def test_message_auth_flags_reads_authentication_results(self):
         msg = EmailMessage()
         msg["Authentication-Results"] = "mx; dkim=pass header.i=@amazon.es; spf=pass; dmarc=fail"
@@ -327,6 +346,151 @@ class ExtractionAndAuthTests(unittest.TestCase):
         )
 
         self.assertEqual(carrier, "GLS")
+
+    def test_guess_carrier_prefers_official_sender_rules(self):
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="UPS <customer-notifications@ups.com>",
+                subject="Actualizacion",
+                body="Mensaje corto",
+            ),
+            "UPS",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="SEUR <infoenvios@mail.seur.info>",
+                subject="Aviso",
+                body="Mensaje corto",
+            ),
+            "SEUR",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="DHL <noreply@dhl.de>",
+                subject="Actualizacion",
+                body="Mensaje corto",
+            ),
+            "DHL",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="Correos <aviso@correos.es>",
+                subject="Actualizacion",
+                body="Mensaje corto",
+            ),
+            "Correos España",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="amazon shipping <no-reply@shipping.amazon.es>",
+                subject="Tu paquete esta en reparto",
+                body="Rastrear y gestionar paquete",
+            ),
+            "Amazon",
+        )
+
+    def test_guess_carrier_supports_curated_exact_sender_addresses(self):
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="TIPSA <no-reply@tip-sa.com>",
+                subject="Aviso",
+                body="Mensaje corto",
+            ),
+            "TIPSA",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="CTT <noreplyclientes@cttexpress.org>",
+                subject="Aviso",
+                body="Mensaje corto",
+            ),
+            "CTT Express",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="Correos Express <no-reply@correosexpress.com>",
+                subject="Aviso",
+                body="Mensaje corto",
+            ),
+            "Correos Express",
+        )
+        self.assertEqual(
+            worker.guess_carrier(
+                sender="InPost <no_reply@info.inpost.es>",
+                subject="Aviso",
+                body="Mensaje corto",
+            ),
+            "InPost",
+        )
+
+    def test_merchant_sender_catalog_is_not_treated_as_carrier_yet(self):
+        self.assertIsNone(worker.official_carrier_from_sender("DOMADOO <assistance@domadoo.com>"))
+        self.assertIsNone(worker.official_carrier_from_sender("MIRAVIA <miravia@service.miravia.es>"))
+
+
+class ProcessAccountTests(unittest.TestCase):
+    def test_process_account_marks_package_like_without_tracking(self):
+        msg = EmailMessage()
+        msg["Subject"] = "Tu envio ya esta en camino"
+        msg["From"] = "DHL <noreply@dhl.de>"
+        msg["Date"] = "Wed, 25 Mar 2026 10:00:00 +0000"
+        msg.set_content("Consulta el estado de tu envio en la app.")
+
+        class DummyClient:
+            def close(self):
+                return None
+
+            def logout(self):
+                return None
+
+        with patch.object(worker, "login_imap", return_value=DummyClient()), patch.object(
+            worker, "list_new_uids", return_value=[1]
+        ), patch.object(worker, "fetch_message", return_value=msg):
+            items, max_uid, scanned, filtered_out, filtered_reasons, filtered_samples = worker.process_account(
+                account={
+                    "email": "demo@example.com",
+                    "owner": "owner_a",
+                    "provider": "outlook",
+                    "mailbox": "INBOX",
+                    "auth": "password",
+                    "username": "demo@example.com",
+                    "password": "pw",
+                    "filters": {},
+                },
+                last_uid=0,
+                lookback_days=60,
+                fetch_limit=120,
+                timeout_sec=20,
+                ignore_rules=[],
+            )
+
+        self.assertEqual(items, [])
+        self.assertEqual(max_uid, 1)
+        self.assertEqual(scanned, 1)
+        self.assertEqual(filtered_out, 1)
+        self.assertEqual(filtered_reasons["package_like_but_no_tracking"], 1)
+        self.assertEqual(filtered_samples["package_like_but_no_tracking"][0]["subject"], "Tu envio ya esta en camino")
+
+    def test_classify_status_supports_amazon_order_and_shipping_messages(self):
+        status_order, _note_order = worker.classify_status(
+            subject="Pedido: producto de prueba",
+            body="Gracias por tu pedido. Pedido n.º 171-6273296-7097149",
+            sender="Amazon.es <auto-confirm@amazon.es>",
+        )
+        status_shipped, _note_shipped = worker.classify_status(
+            subject="Tu paquete se ha enviado",
+            body="¡Tu paquete se ha enviado! Pedido n.º 406-5156836-6489112",
+            sender="Amazon.es <confirmar-envio@amazon.es>",
+        )
+        status_ofd, _note_ofd = worker.classify_status(
+            subject="Tu paquete está en reparto",
+            body="Tu paquete está en reparto. Rastrear y gestionar paquete",
+            sender="amazon shipping <no-reply@shipping.amazon.es>",
+        )
+
+        self.assertEqual(status_order, "info_received")
+        self.assertEqual(status_shipped, "in_transit")
+        self.assertEqual(status_ofd, "out_for_delivery")
 
 
 if __name__ == "__main__":

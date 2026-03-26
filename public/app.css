@@ -17,6 +17,22 @@
   --radius-md: 12px;
 }
 
+:root[data-theme="dark"] {
+  --bg-top: #121816;
+  --bg-bottom: #1f2b28;
+  --ink: #ecf1ed;
+  --muted: #aeb8b5;
+  --panel: rgba(25, 34, 32, 0.86);
+  --panel-strong: rgba(29, 39, 36, 0.96);
+  --line: rgba(236, 241, 237, 0.12);
+  --accent: #d97745;
+  --accent-deep: #efb48f;
+  --ok: #8bc8aa;
+  --warn: #e1bf67;
+  --danger: #e28678;
+  --shadow: 0 22px 60px rgba(5, 8, 8, 0.35);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -304,6 +320,16 @@ body {
   padding: 18px;
 }
 
+.item-card[data-state="delivered"] {
+  border-color: rgba(43, 122, 87, 0.12);
+  background: rgba(244, 249, 246, 0.78);
+}
+
+:root[data-theme="dark"] .item-card[data-state="delivered"] {
+  border-color: rgba(139, 200, 170, 0.18);
+  background: rgba(28, 45, 39, 0.72);
+}
+
 .item-topline {
   display: flex;
   justify-content: space-between;
@@ -359,6 +385,10 @@ body {
 .state-pill[data-state="delivered"] {
   color: var(--ok);
   background: rgba(43, 122, 87, 0.14);
+}
+
+:root[data-theme="dark"] .state-pill[data-state="delivered"] {
+  background: rgba(139, 200, 170, 0.16);
 }
 
 .state-pill[data-state="pending"] {
@@ -417,6 +447,11 @@ button:disabled {
   border: 1px solid rgba(23, 33, 32, 0.12);
 }
 
+:root[data-theme="dark"] .ghost-button {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(236, 241, 237, 0.12);
+}
+
 .soft-button {
   color: var(--ink);
   background: rgba(23, 33, 32, 0.06);
@@ -434,6 +469,20 @@ button:disabled {
   background: rgba(255, 255, 255, 0.5);
   text-align: center;
   color: var(--muted);
+}
+
+:root[data-theme="dark"] .field input {
+  border-color: rgba(236, 241, 237, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+:root[data-theme="dark"] .soft-button {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+:root[data-theme="dark"] .empty-state {
+  border-color: rgba(236, 241, 237, 0.14);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 @media (max-width: 840px) {

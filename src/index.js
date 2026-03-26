@@ -87,8 +87,8 @@ function localIsoWithOffset(d = new Date()) {
  * }
  */
 
-function loadStore() { return readJson(STORE_FILE, { owners: {} }); }
-function saveStore(store) { writeJson(STORE_FILE, store); }
+function loadStore() { return sanitizeStore(readJson(STORE_FILE, { owners: {} })); }
+function saveStore(store) { writeJson(STORE_FILE, sanitizeStore(store)); }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -618,6 +618,32 @@ app.post("/api/telegram/tracking/:owner/:tracking/delivered", (req, res) => {
     tracking,
     delivered_override: true
   });
+});
+
+app.post("/api/telegram/tracking/:owner/:tracking/not_package", (req, res) => {
+  const owner = normalizeTelegramOwner(req.params.owner);
+  const tracking = normalizeTracking(req.params.tracking);
+  if (!req.telegramSession.owners.includes(owner)) {
+    return res.status(403).json({ ok: false, error: "telegram_owner_not_allowed" });
+  }
+
+  const store = loadStore();
+  const result = markTrackingAsNotPackage(store, owner, tracking);
+  if (!result.ok) return res.status(result.status).json(result);
+
+  const o = getOwner(store, owner);
+  if (ownerIsEmpty(o)) delete store.owners[owner];
+  else store.owners[owner] = o;
+  saveStore(store);
+
+  logAt("info", "telegram_tracking_marked_not_package", {
+    req_id: req.reqId,
+    telegram_user_id: req.telegramSession.telegram_user_id,
+    owner,
+    tracking
+  });
+
+  return res.json(result);
 });
 
 // Carriers live in ./carriers.js for easier maintenance (names + keys).
@@ -1366,6 +1392,88 @@ function ensureOwnerShape(store, owner) {
   return o;
 }
 
+function normalizeTrackingKeyedMap(rawMap, valueFactory = () => ({})) {
+  const out = {};
+  if (!rawMap || typeof rawMap !== "object") return out;
+
+  for (const [rawKey, rawValue] of Object.entries(rawMap)) {
+    const key = normalizeTracking(rawKey);
+    if (!key) continue;
+    out[key] = rawValue && typeof rawValue === "object" ? rawValue : valueFactory();
+  }
+
+  return out;
+}
+
+function normalizeAnnouncedMap(rawAnnounced) {
+  const out = {};
+  const source = rawAnnounced && typeof rawAnnounced === "object" ? rawAnnounced : {};
+  for (const [rawKey, rawValue] of Object.entries(source)) {
+    const key = normalizeTracking(rawKey);
+    if (!key || !rawValue) continue;
+    out[key] = true;
+  }
+  return out;
+}
+
+function sanitizeStore(store) {
+  const next = store && typeof store === "object" ? store : {};
+  const rawOwners = next.owners && typeof next.owners === "object" ? next.owners : {};
+  const mergedOwners = {};
+
+  for (const [rawOwnerKey, rawOwnerValue] of Object.entries(rawOwners)) {
+    const owner = String(rawOwnerKey || "").trim().toLowerCase();
+    if (!owner) continue;
+    const rawOwner = rawOwnerValue && typeof rawOwnerValue === "object" ? rawOwnerValue : {};
+    const current = mergedOwners[owner] && typeof mergedOwners[owner] === "object" ? mergedOwners[owner] : {};
+
+    mergedOwners[owner] = {
+      ...current,
+      ...rawOwner,
+      trackings: [
+        ...(Array.isArray(current.trackings) ? current.trackings : []),
+        ...(Array.isArray(rawOwner.trackings) ? rawOwner.trackings : [])
+      ],
+      meta: {
+        ...(current.meta && typeof current.meta === "object" ? current.meta : {}),
+        ...(rawOwner.meta && typeof rawOwner.meta === "object" ? rawOwner.meta : {})
+      },
+      last: {
+        ...(current.last && typeof current.last === "object" ? current.last : {}),
+        ...(rawOwner.last && typeof rawOwner.last === "object" ? rawOwner.last : {})
+      },
+      imap_accounts: [
+        ...(Array.isArray(current.imap_accounts) ? current.imap_accounts : []),
+        ...(Array.isArray(rawOwner.imap_accounts) ? rawOwner.imap_accounts : [])
+      ],
+      imap_ignore_rules: [
+        ...(Array.isArray(current.imap_ignore_rules) ? current.imap_ignore_rules : []),
+        ...(Array.isArray(rawOwner.imap_ignore_rules) ? rawOwner.imap_ignore_rules : [])
+      ],
+      announced: {
+        ...(current.announced && typeof current.announced === "object" ? current.announced : {}),
+        ...(rawOwner.announced && typeof rawOwner.announced === "object" ? rawOwner.announced : {})
+      }
+    };
+  }
+
+  next.owners = mergedOwners;
+
+  for (const owner of Object.keys(mergedOwners)) {
+    const o = ensureOwnerShape(next, owner);
+    o.meta = normalizeTrackingKeyedMap(o.meta);
+    o.last = normalizeTrackingKeyedMap(o.last, () => null);
+
+    if (o.announced && typeof o.announced === "object") {
+      o.announced.out_for_delivery = normalizeAnnouncedMap(o.announced.out_for_delivery);
+    }
+
+    if (ownerIsEmpty(o)) delete next.owners[owner];
+  }
+
+  return next;
+}
+
 function normalizeImapAccountEntry(a) {
   const email = String(a?.email || "").trim().toLowerCase();
   if (!email || !email.includes("@")) return null;
@@ -1929,7 +2037,16 @@ function effectiveIsOutForDelivery(one) {
 // ---- Pending detection and refresh policy helpers ----
 
 function ownerTrackings(o) {
-  return Array.isArray(o?.trackings) ? o.trackings.map((x) => normalizeTracking(x)).filter(Boolean) : [];
+  if (!Array.isArray(o?.trackings)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of o.trackings) {
+    const tracking = normalizeTracking(raw);
+    if (!tracking || seen.has(tracking)) continue;
+    seen.add(tracking);
+    out.push(tracking);
+  }
+  return out;
 }
 
 // Returns list of tracking numbers that are NOT delivered (honoring delivered_override).
@@ -2151,6 +2268,49 @@ function removeTrackingFromOwner(o, trackingRaw) {
     removed_meta: removedFromMeta,
     removed_last: removedFromLast
   };
+}
+
+function reconcileImapAccountOwnership(store, ownerRaw, accountEmailRaw) {
+  const owner = String(ownerRaw || "").trim().toLowerCase();
+  const accountEmail = String(accountEmailRaw || "").trim().toLowerCase();
+  if (!owner || !accountEmail || !accountEmail.includes("@")) {
+    return { account_email: accountEmail || null, removed_trackings: 0, owners: [] };
+  }
+
+  let removedTrackings = 0;
+  const touched = [];
+
+  for (const foreignOwner of ownersFromStore(store)) {
+    if (foreignOwner === owner) continue;
+    const o = getOwner(store, foreignOwner);
+    if (!o) continue;
+
+    let removedOwnerTrackings = 0;
+    const hadAccount = ownerImapAccounts(o).some((entry) => entry.email === accountEmail);
+    if (hadAccount) removeOwnerImapAccount(o, accountEmail);
+
+    for (const tracking of ownerTrackings(o)) {
+      const meta = getTrackingMeta(o, tracking);
+      const trackingAccount = String(meta?.imap_account || "").trim().toLowerCase();
+      if (trackingAccount !== accountEmail) continue;
+      const removed = removeTrackingFromOwner(o, tracking);
+      if (removed.removed) removedOwnerTrackings += removed.removed_count;
+    }
+
+    if (!hadAccount && removedOwnerTrackings === 0) continue;
+
+    removedTrackings += removedOwnerTrackings;
+    touched.push({
+      owner: foreignOwner,
+      removed_trackings: removedOwnerTrackings,
+      removed_account: hadAccount
+    });
+
+    if (ownerIsEmpty(o)) delete store.owners[foreignOwner];
+    else store.owners[foreignOwner] = o;
+  }
+
+  return { account_email: accountEmail, removed_trackings: removedTrackings, owners: touched };
 }
 
 function markTrackingAsNotPackage(store, ownerRaw, trackingRaw) {
@@ -2495,27 +2655,48 @@ app.post("/api/owner/:owner/imap/accounts", (req, res) => {
 
   const store = loadStore();
   const o = ensureOwnerShape(store, owner);
+  const prevAccount = ownerImapAccounts(o).find((entry) => entry.email === email) || null;
   const account = upsertOwnerImapAccount(o, {
     email,
     provider: provider || inferImapProvider(email),
     enabled: enabled === undefined ? true : enabled
   });
+  const reconciliation = reconcileImapAccountOwnership(store, owner, email);
   saveStore(store);
-  logAt("info", "imap_account_upserted", {
-    req_id: req.reqId,
-    owner,
-    account_email: email,
-    provider: account?.provider || null
-  });
-  postHaAuditLogSafe("info", "imap_account_upserted", {
-    owner,
-    account_email: email,
-    provider: account?.provider || null
-  });
+  const changed =
+    !prevAccount ||
+    prevAccount.provider !== account?.provider ||
+    prevAccount.enabled !== account?.enabled;
+  if (changed) {
+    logAt("info", "imap_account_upserted", {
+      req_id: req.reqId,
+      owner,
+      account_email: email,
+      provider: account?.provider || null
+    });
+    postHaAuditLogSafe("info", "imap_account_upserted", {
+      owner,
+      account_email: email,
+      provider: account?.provider || null
+    });
+  }
+  if (reconciliation.removed_trackings > 0 || reconciliation.owners.length > 0) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      account_email: email,
+      removed_trackings: reconciliation.removed_trackings,
+      owners: reconciliation.owners
+    };
+    logAt("warn", "imap_account_upsert_reconciled_ownership", payload);
+    postHaAuditLogSafe("warn", "imap_account_upsert_reconciled_ownership", payload);
+  }
   return res.json({
     ok: true,
     owner,
     account,
+    changed,
+    reconciliation,
     count: ownerImapAccounts(o).length
   });
 });
@@ -2585,6 +2766,8 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
   const o = ensureOwnerShape(store, owner);
   const now = new Date();
   const accepted = [];
+  const reconciledAccounts = new Set();
+  const reconciliationEvents = [];
   let skipped_invalid = 0;
 
   for (const item of items) {
@@ -2600,6 +2783,15 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
       .toLowerCase();
     if (accountEmail && accountEmail.includes("@")) {
       upsertOwnerImapAccount(o, { email: accountEmail, provider: inferImapProvider(accountEmail), enabled: true });
+      if (!reconciledAccounts.has(accountEmail)) {
+        // The worker's owner/account pairing is authoritative. If an account was
+        // previously attached to another owner, clean those leftovers now.
+        const reconciliation = reconcileImapAccountOwnership(store, owner, accountEmail);
+        reconciledAccounts.add(accountEmail);
+        if (reconciliation.removed_trackings > 0 || reconciliation.owners.length > 0) {
+          reconciliationEvents.push(reconciliation);
+        }
+      }
     }
 
     const prev = getTrackingMeta(o, tracking);
@@ -2619,6 +2811,17 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
 
   o.last_imap_ingest_at = now.toISOString();
   saveStore(store);
+  for (const reconciliation of reconciliationEvents) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      account_email: reconciliation.account_email,
+      removed_trackings: reconciliation.removed_trackings,
+      owners: reconciliation.owners
+    };
+    logAt("warn", "imap_ingest_reconciled_account_ownership", payload);
+    postHaAuditLogSafe("warn", "imap_ingest_reconciled_account_ownership", payload);
+  }
   if (skipped_invalid > 0) {
     // Keep this as warning to surface malformed payloads in HA logbook.
     logAt("warn", "imap_ingest_items_skipped_invalid", {
@@ -3298,6 +3501,9 @@ module.exports = {
     trackingLifecycleState,
     listTelegramTrackings,
     triggerManualImapRefresh,
-    splitLogLines
+    splitLogLines,
+    ownerTrackings,
+    sanitizeStore,
+    reconcileImapAccountOwnership
   }
 };

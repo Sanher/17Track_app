@@ -4,9 +4,11 @@ const state = {
   search: "",
   dateFrom: "",
   dateTo: "",
-  selectedKeys: new Set()
+  selectedKeys: new Set(),
+  theme: localStorage.getItem("paquetes_app_theme") || ""
 };
 
+const themeToggleButton = document.getElementById("themeToggleButton");
 const refreshButton = document.getElementById("refreshButton");
 const authToggleButton = document.getElementById("authToggleButton");
 const saveApiKeyButton = document.getElementById("saveApiKeyButton");
@@ -50,6 +52,30 @@ const bulkButtons = [
 ];
 
 apiKeyInput.value = state.apiKey;
+
+function preferredTheme() {
+  if (state.theme === "light" || state.theme === "dark") return state.theme;
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function updateThemeToggleLabel(theme) {
+  if (!themeToggleButton) return;
+  themeToggleButton.textContent = theme === "dark" ? "Modo claro" : "Modo oscuro";
+}
+
+function applyTheme(theme) {
+  const nextTheme = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = nextTheme;
+  state.theme = nextTheme;
+  localStorage.setItem("paquetes_app_theme", nextTheme);
+  updateThemeToggleLabel(nextTheme);
+}
+
+function toggleTheme() {
+  applyTheme(preferredTheme() === "dark" ? "light" : "dark");
+}
 
 function setStatus(message, type = "info") {
   if (!message) {
@@ -404,6 +430,7 @@ function renderOwners() {
       const buttons = [saveButton, deliveredButton, undeliveredButton, notPackageButton, deleteButton];
 
       const currentKey = itemKey(item.owner, item.tracking);
+      itemNode.dataset.state = item.delivered_effective ? "delivered" : "pending";
       selectCheckbox.checked = state.selectedKeys.has(currentKey);
       selectCheckbox.addEventListener("change", () => {
         if (selectCheckbox.checked) state.selectedKeys.add(currentKey);
@@ -534,6 +561,10 @@ refreshButton.addEventListener("click", () => {
   loadOwners();
 });
 
+themeToggleButton.addEventListener("click", () => {
+  toggleTheme();
+});
+
 authToggleButton.addEventListener("click", () => {
   authPanel.classList.toggle("hidden");
 });
@@ -618,5 +649,7 @@ deleteOlderButton.addEventListener("click", async () => {
   }
   await performActionOnItems("delete", items);
 });
+
+applyTheme(preferredTheme());
 
 loadOwners();

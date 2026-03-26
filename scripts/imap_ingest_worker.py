@@ -58,6 +58,7 @@ TRACKING_STRONG_PATTERNS = [
     re.compile(r"\b[0-9]{18,22}\b"),  # long numeric IDs
 ]
 TRACKING_WEAK_PATTERN = re.compile(r"\b[A-Z0-9][A-Z0-9-]{7,34}\b")
+AMAZON_ORDER_ID_PATTERN = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
 
 SHIPPING_KEYWORDS = {
     "tracking",
@@ -129,11 +130,128 @@ CARRIER_HINTS = [
     ("dhl", "DHL"),
     ("fedex", "FedEx"),
     ("usps", "USPS"),
-    ("correos", "Correos"),
+    ("correos", "Correos España"),
     ("seur", "SEUR"),
     ("gls", "GLS"),
     ("mrw", "MRW"),
     ("ctt", "CTT"),
+]
+
+# Seeded from official anti-phishing/help pages published by carriers plus
+# validated real-world samples. This is intentionally partial and conservative:
+# we use it as a positive signal for carrier detection, not as a hard allowlist
+# for all package emails.
+OFFICIAL_CARRIER_SENDERS: dict[str, dict[str, list[str]]] = {
+    "UPS": {
+        "emails": [
+            "accountconfirm@ups.com",
+            "mcinfo@ups.com",
+            "pkginfo@ups.com",
+            "customer-notifications@ups.com",
+            "auto-notify@ups.com",
+            "emailinfo@ups.com",
+            "invoice-notification@ups.com",
+            "upsadministrationsupport@ups.com",
+            "donotreply@ups.com",
+        ],
+        "domains": ["ups.com"],
+    },
+    "SEUR": {
+        "emails": [
+            "infoenvios@mail.seur.info",
+            "seur@network1.pickup-services.com",
+        ],
+        "domains": ["mail.seur.info", "network1.pickup-services.com", "seur.com"],
+    },
+    "DHL": {
+        "emails": ["noreply@dhl.com", "noreplyparcel.spain@dhl.com", "noreply@dhl.de"],
+        "domains": ["dhl.com", "dpdhl.com", "dhl.de", "dhl.fr", "dhl-news.com"],
+    },
+    "GLS": {
+        "emails": ["noreply@comunicaciones.gls-spain.com"],
+        "domains": [
+            "gls-group.eu",
+            "glsdanmark.dk",
+            "gls-denmark.com",
+            "gls-netherlands.com",
+            "gls.nl",
+            "comunicaciones.gls-spain.com",
+            "gls-spain.com",
+        ],
+    },
+    "TIPSA": {
+        "emails": ["no-reply@tip-sa.com"],
+        "domains": ["tip-sa.com"],
+    },
+    "CTT Express": {
+        "emails": ["noreplyclientes@cttexpress.org"],
+        "domains": ["cttexpress.org"],
+    },
+    "FedEx": {
+        "emails": ["noreply@fedex.com"],
+        "domains": ["fedex.com"],
+    },
+    "Correos España": {
+        "emails": ["correos@correos.com"],
+        "domains": ["correos.es", "correos.com"],
+    },
+    "Celeritas": {
+        "emails": ["no-reply@celeritastransporte.com"],
+        "domains": ["celeritastransporte.com"],
+    },
+    "Envialia": {
+        "emails": ["maildelivery@envialia.com"],
+        "domains": ["envialia.com"],
+    },
+    "Correos Express": {
+        "emails": ["no-reply@correosexpress.com"],
+        "domains": ["correosexpress.com"],
+    },
+    "InPost": {
+        "emails": ["no_reply@info.inpost.es"],
+        "domains": ["info.inpost.es", "inpost.es"],
+    },
+    "Ecoscooting": {
+        "emails": ["noreply@service.ecoscooting.com"],
+        "domains": ["service.ecoscooting.com", "ecoscooting.com"],
+    },
+    "MRW": {
+        "emails": ["no_reply@mrw.es"],
+        "domains": ["mrw.es"],
+    },
+}
+
+# Kept separate on purpose: these are merchant senders that may talk about
+# shipments, but we do not elevate them to carrier-like trust until their
+# templates are reviewed in more detail to avoid order/payment/promotional
+# false positives.
+KNOWN_MERCHANT_SENDERS: dict[str, list[str]] = {
+    "DOMADOO": ["assistance@domadoo.com"],
+    "MIRAVIA": ["miravia@service.miravia.es"],
+    "NATULIM": ["natulim@natulim.com"],
+    "XIAOMI": ["noreply@notice.xiaomi.com"],
+    "SHIPPY PRO": ["no-reply@shippypro.com"],
+}
+
+OFFICIAL_AMAZON_SENDERS = {
+    "emails": [
+        "no-reply@shipping.amazon.es",
+        "auto-confirm@amazon.es",
+        "confirmar-envio@amazon.es",
+        "order-update@amazon.es",
+        "no-reply@amazon.es",
+    ],
+    "domains": ["amazon.es", "shipping.amazon.es"],
+}
+
+AMAZON_ORDER_PLACED_KEYWORDS = [
+    "gracias por tu pedido",
+    "pedido:",
+]
+
+AMAZON_SHIPPED_KEYWORDS = [
+    "tu paquete se ha enviado",
+    "pedido enviado",
 ]
 
 NON_PACKAGE_KEYWORDS_ANY = [
@@ -276,6 +394,77 @@ def first_email_domain(from_header: str) -> str:
     return ""
 
 
+def first_email_address(from_header: str) -> str:
+    raw = str(from_header or "").strip().lower()
+    if not raw:
+        return ""
+    emails = re.findall(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", raw)
+    if emails:
+        return emails[-1]
+    return ""
+
+
+def official_carrier_from_sender(sender: str) -> str | None:
+    sender_email = first_email_address(sender)
+    sender_domain = first_email_domain(sender)
+    if not sender_email and not sender_domain:
+        return None
+
+    for carrier, rules in OFFICIAL_CARRIER_SENDERS.items():
+        emails = set(rules.get("emails") or [])
+        domains = rules.get("domains") or []
+        if sender_email and sender_email in emails:
+            return carrier
+        if sender_domain and any(
+            sender_domain == domain or sender_domain.endswith(f".{domain}")
+            for domain in domains
+        ):
+            return carrier
+        if sender_domain and (
+            re.fullmatch(r"dhl\.[a-z]{2,}", sender_domain)
+            or re.fullmatch(r"dhl\.[a-z]{2,}\.[a-z]{2,}", sender_domain)
+        ):
+            return "DHL"
+
+    return None
+
+
+def official_amazon_sender(sender: str) -> bool:
+    sender_email = first_email_address(sender)
+    sender_domain = first_email_domain(sender)
+    if sender_email and sender_email in set(OFFICIAL_AMAZON_SENDERS["emails"]):
+        return True
+    if sender_domain and any(
+        sender_domain == domain or sender_domain.endswith(f".{domain}")
+        for domain in OFFICIAL_AMAZON_SENDERS["domains"]
+    ):
+        return True
+    return False
+
+
+def extract_amazon_order_ids(subject: str, body: str, sender: str = "") -> list[str]:
+    if not official_amazon_sender(sender):
+        return []
+    source = f"{subject}\n{body}".upper()
+    return [normalize_tracking(match) for match in AMAZON_ORDER_ID_PATTERN.findall(source)]
+
+
+def looks_package_like(sender: str, subject: str, body: str) -> bool:
+    text = f"{sender}\n{subject}\n{body}".lower()
+    if has_shipping_context(text):
+        return True
+    if official_amazon_sender(sender):
+        if extract_amazon_order_ids(subject, body, sender=sender):
+            return True
+        if any(keyword in text for keyword in AMAZON_ORDER_PLACED_KEYWORDS + AMAZON_SHIPPED_KEYWORDS):
+            return True
+    if official_carrier_from_sender(sender):
+        return True
+    if guess_carrier(sender, subject, body):
+        return True
+    return False
+
+
 def message_auth_flags(msg: Any) -> dict[str, bool]:
     auth_raw = str(msg.get("Authentication-Results") or "").lower()
     return {
@@ -407,7 +596,7 @@ def looks_like_tracking_candidate(token: str) -> bool:
     return True
 
 
-def extract_tracking_numbers(subject: str, body: str) -> list[str]:
+def extract_tracking_numbers(subject: str, body: str, sender: str = "") -> list[str]:
     source = f"{subject}\n{body}".upper()
     lower = source.lower()
     found: list[str] = []
@@ -426,15 +615,30 @@ def extract_tracking_numbers(subject: str, body: str) -> list[str]:
         for match in regex.findall(source):
             add_candidate(match)
 
-    if has_shipping_context(lower):
+    if official_amazon_sender(sender):
+        for match in extract_amazon_order_ids(subject, body, sender=sender):
+            add_candidate(match)
+
+    trusted_sender = official_carrier_from_sender(sender)
+    if trusted_sender or has_shipping_context(lower):
         for match in TRACKING_WEAK_PATTERN.findall(source):
             add_candidate(match)
 
     return found
 
 
-def classify_status(subject: str, body: str) -> tuple[str, str]:
+def classify_status(subject: str, body: str, sender: str = "") -> tuple[str, str]:
     text = f"{subject}\n{body}".lower()
+    if official_amazon_sender(sender):
+        if any(word in text for word in DELIVERED_KEYWORDS):
+            return "delivered", "Estado Amazon detectado por entrega"
+        if any(word in text for word in OUT_FOR_DELIVERY_KEYWORDS):
+            return "out_for_delivery", "Estado Amazon detectado por reparto"
+        if any(word in text for word in AMAZON_SHIPPED_KEYWORDS):
+            return "in_transit", "Estado Amazon detectado por envio"
+        if extract_amazon_order_ids(subject, body, sender=sender) and any(word in text for word in AMAZON_ORDER_PLACED_KEYWORDS):
+            return "info_received", "Estado Amazon detectado por confirmacion de pedido"
+
     is_delivered = any(word in text for word in DELIVERED_KEYWORDS)
     is_ofd = any(word in text for word in OUT_FOR_DELIVERY_KEYWORDS)
     if is_delivered and not is_ofd:
@@ -449,6 +653,13 @@ def classify_status(subject: str, body: str) -> tuple[str, str]:
 
 
 def guess_carrier(sender: str, subject: str, body: str) -> str | None:
+    if official_amazon_sender(sender):
+        return "Amazon"
+
+    official_match = official_carrier_from_sender(sender)
+    if official_match:
+        return official_match
+
     sender_text = str(sender or "").lower()
     subject_text = str(subject or "").lower()
     body_text = str(body or "").lower()
@@ -881,13 +1092,25 @@ def process_account(
     fetch_limit: int,
     timeout_sec: int,
     ignore_rules: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], int, int, int, dict[str, int]]:
+) -> tuple[list[dict[str, Any]], int, int, int, dict[str, int], dict[str, list[dict[str, str | None]]]]:
     client: imaplib.IMAP4_SSL | None = None
     max_seen_uid = last_uid
     scanned = 0
     filtered_out = 0
     filtered_reasons: dict[str, int] = {}
+    filtered_samples: dict[str, list[dict[str, str | None]]] = {}
     items: list[dict[str, Any]] = []
+
+    def add_filtered_sample(reason: str, sender: str, subject: str) -> None:
+        bucket = filtered_samples.setdefault(reason, [])
+        if len(bucket) >= 3:
+            return
+        bucket.append(
+            {
+                "sender": str(sender or "").strip()[:160] or None,
+                "subject": str(subject or "").strip()[:180] or None,
+            }
+        )
 
     try:
         client = login_imap(account, timeout_sec=timeout_sec)
@@ -914,6 +1137,7 @@ def process_account(
             if not accepted:
                 filtered_out += 1
                 filtered_reasons[reason] = filtered_reasons.get(reason, 0) + 1
+                add_filtered_sample(reason, sender, subject)
                 continue
 
             ignored, ignore_reason = message_matches_ignore_rule(
@@ -926,18 +1150,24 @@ def process_account(
                 filtered_out += 1
                 reason_key = f"matched_ignore_rule:{ignore_reason}"
                 filtered_reasons[reason_key] = filtered_reasons.get(reason_key, 0) + 1
+                add_filtered_sample(reason_key, sender, subject)
                 continue
 
             if looks_like_non_package_message(sender=sender, subject=subject, body=body):
                 filtered_out += 1
                 filtered_reasons["non_package_signature"] = filtered_reasons.get("non_package_signature", 0) + 1
+                add_filtered_sample("non_package_signature", sender, subject)
                 continue
 
-            trackings = extract_tracking_numbers(subject=subject, body=body)
+            trackings = extract_tracking_numbers(subject=subject, body=body, sender=sender)
             if not trackings:
+                if looks_package_like(sender=sender, subject=subject, body=body):
+                    filtered_out += 1
+                    filtered_reasons["package_like_but_no_tracking"] = filtered_reasons.get("package_like_but_no_tracking", 0) + 1
+                    add_filtered_sample("package_like_but_no_tracking", sender, subject)
                 continue
 
-            status, status_note = classify_status(subject=subject, body=body)
+            status, status_note = classify_status(subject=subject, body=body, sender=sender)
             description = subject.strip()[:180] if subject.strip() else status_note
             carrier_name = guess_carrier(sender=sender, subject=subject, body=body)
 
@@ -965,7 +1195,7 @@ def process_account(
             except Exception:
                 pass
 
-    return dedupe_items(items), max_seen_uid, scanned, filtered_out, filtered_reasons
+    return dedupe_items(items), max_seen_uid, scanned, filtered_out, filtered_reasons, filtered_samples
 
 
 def chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -1019,6 +1249,39 @@ def fetch_ignore_rules(base_url: str, owner: str, api_key: str, timeout_sec: int
     return rules if isinstance(rules, list) else []
 
 
+def post_account_binding(
+    base_url: str,
+    owner: str,
+    account: dict[str, Any],
+    api_key: str,
+    timeout_sec: int,
+) -> dict[str, Any]:
+    endpoint = f"{base_url.rstrip('/')}/api/owner/{quote(owner, safe='')}/imap/accounts"
+    payload = json.dumps(
+        {
+            "email": account["email"],
+            "provider": account["provider"],
+            "enabled": True,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    req = Request(endpoint, data=payload, headers=headers, method="POST")
+    with urlopen(req, timeout=timeout_sec) as res:
+        body = res.read()
+        status_code = res.status
+
+    if status_code < 200 or status_code >= 300:
+        raise RuntimeError(f"account_binding_http_{status_code}")
+
+    if not body:
+        return {}
+    return json.loads(body.decode("utf-8", errors="replace"))
+
+
 def main() -> int:
     load_dotenv_defaults(Path(str(os.getenv("IMAP_WORKER_DOTENV_PATH") or DEFAULT_DOTENV_PATH)))
 
@@ -1066,6 +1329,35 @@ def main() -> int:
         last_uid = parse_int(old_state.get("last_uid"), 0)
 
         try:
+            try:
+                account_binding_response = post_account_binding(
+                    base_url=base_url,
+                    owner=account["owner"],
+                    account=account,
+                    api_key=api_key,
+                    timeout_sec=timeout_sec,
+                )
+                reconciliation = account_binding_response.get("reconciliation") if isinstance(account_binding_response, dict) else None
+                if isinstance(reconciliation, dict) and (
+                    parse_int(reconciliation.get("removed_trackings"), 0) > 0
+                    or (isinstance(reconciliation.get("owners"), list) and reconciliation.get("owners"))
+                ):
+                    log(
+                        "warn",
+                        "imap_account_binding_reconciled",
+                        owner=account["owner"],
+                        email=account["email"],
+                        reconciliation=reconciliation,
+                    )
+            except Exception as exc:
+                log(
+                    "warn",
+                    "imap_account_binding_failed",
+                    owner=account["owner"],
+                    email=account["email"],
+                    error=str(exc),
+                )
+
             owner_ignore_rules = ignore_rules_by_owner.get(account["owner"])
             if owner_ignore_rules is None:
                 try:
@@ -1085,7 +1377,7 @@ def main() -> int:
                     )
                 ignore_rules_by_owner[account["owner"]] = owner_ignore_rules
 
-            items, max_uid, scanned, filtered_out, filtered_reasons = process_account(
+            items, max_uid, scanned, filtered_out, filtered_reasons, filtered_samples = process_account(
                 account=account,
                 last_uid=last_uid,
                 lookback_days=lookback_days,
@@ -1103,6 +1395,7 @@ def main() -> int:
                     "last_filtered_count": filtered_out,
                     # Persist filter reason counters to debug false positives/noise per account.
                     "last_filtered_reasons": filtered_reasons,
+                    "last_filtered_samples": filtered_samples,
                     "provider": account["provider"],
                     "mailbox": account["mailbox"],
                 },
@@ -1120,6 +1413,7 @@ def main() -> int:
                 scanned=scanned,
                 filtered=filtered_out,
                 filtered_reasons=filtered_reasons,
+                filtered_samples=filtered_samples,
                 extracted=len(items),
                 last_uid_before=last_uid,
                 last_uid_after=max_uid,

@@ -112,6 +112,85 @@ test("override rejects missing tracking without creating orphan metadata", () =>
   assert.deepEqual(Object.keys(store.owners.owner_a.meta), ["KNOWN1"]);
 });
 
+test("ownerTrackings dedupes repeated tracking ids from legacy store data", () => {
+  const trackings = _test.ownerTrackings({
+    trackings: ["abc123", " ABC123 ", "xyz789", "XYZ789", "", null]
+  });
+
+  assert.deepEqual(trackings, ["ABC123", "XYZ789"]);
+});
+
+test("sanitizeStore normalizes duplicated owner keys and tracking maps", () => {
+  const store = _test.sanitizeStore({
+    owners: {
+      David: {
+        trackings: ["abc123", " ABC123 "],
+        meta: {
+          " abc123 ": { source: "imap", imap_account: "david@example.com" }
+        },
+        last: {
+          abc123: { number: "abc123", flags: { isDelivered: false } }
+        }
+      },
+      david: {
+        trackings: ["XYZ789"],
+        meta: {
+          xyz789: { source: "imap", imap_account: "david@example.com" }
+        }
+      }
+    }
+  });
+
+  assert.deepEqual(Object.keys(store.owners), ["david"]);
+  assert.deepEqual(store.owners.david.trackings, ["ABC123", "XYZ789"]);
+  assert.deepEqual(Object.keys(store.owners.david.meta).sort(), ["ABC123", "XYZ789"]);
+  assert.deepEqual(Object.keys(store.owners.david.last), ["ABC123"]);
+});
+
+test("reconcileImapAccountOwnership removes foreign account leftovers from other owners", () => {
+  const store = {
+    owners: {
+      david: {
+        trackings: ["MIR1", "DAV1"],
+        meta: {
+          MIR1: { source: "imap", imap_account: "mireia@example.com" },
+          DAV1: { source: "imap", imap_account: "david@example.com" }
+        },
+        last: {
+          MIR1: { number: "MIR1" },
+          DAV1: { number: "DAV1" }
+        },
+        imap_accounts: [{ email: "mireia@example.com", provider: "gmail", enabled: true }]
+      },
+      mireia: {
+        trackings: ["REAL1"],
+        meta: {
+          REAL1: { source: "imap", imap_account: "mireia@example.com" }
+        },
+        last: {
+          REAL1: { number: "REAL1" }
+        }
+      }
+    }
+  };
+
+  const result = _test.reconcileImapAccountOwnership(store, "mireia", "mireia@example.com");
+
+  assert.equal(result.account_email, "mireia@example.com");
+  assert.equal(result.removed_trackings, 1);
+  assert.deepEqual(result.owners, [
+    {
+      owner: "david",
+      removed_trackings: 1,
+      removed_account: true
+    }
+  ]);
+  assert.deepEqual(store.owners.david.trackings, ["DAV1"]);
+  assert.equal(store.owners.david.meta.MIR1, undefined);
+  assert.equal(store.owners.david.last.MIR1, undefined);
+  assert.deepEqual(store.owners.david.imap_accounts, []);
+});
+
 test("mark not package removes tracking and stores ignore rule terms", () => {
   const store = {
     owners: {

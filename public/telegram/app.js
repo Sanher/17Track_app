@@ -2,10 +2,12 @@ const state = {
   me: null,
   items: [],
   couriers: [],
-  refreshPollId: null
+  refreshPollId: null,
+  theme: "light"
 };
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+const THEME_STORAGE_KEY = "tg_paquetes_theme";
 
 const userMeta = document.getElementById("userMeta");
 const appRoot = document.getElementById("appRoot");
@@ -20,16 +22,19 @@ const statusFilter = document.getElementById("statusFilter");
 const courierFilter = document.getElementById("courierFilter");
 const aliasFilter = document.getElementById("aliasFilter");
 const sortFilter = document.getElementById("sortFilter");
+const themeToggleButton = document.getElementById("themeToggleButton");
+const backToTopButton = document.getElementById("backToTopButton");
 
 function setStatus(message, isError = false) {
   if (!message) {
     statusBar.textContent = "";
     statusBar.classList.add("hidden");
+    statusBar.classList.remove("is-error");
     return;
   }
   statusBar.textContent = message;
   statusBar.classList.remove("hidden");
-  statusBar.style.color = isError ? "#8c3112" : "";
+  statusBar.classList.toggle("is-error", !!isError);
 }
 
 function setAccessState(isAuthorized, message = "") {
@@ -46,6 +51,24 @@ function setAccessState(isAuthorized, message = "") {
 function setMailRefreshBusy(isBusy) {
   refreshMailButton.disabled = isBusy;
   refreshMailButton.textContent = isBusy ? "Refrescando..." : "Refrescar correo";
+}
+
+function preferredTheme() {
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (stored === "light" || stored === "dark") return stored;
+  if (tg && tg.colorScheme === "dark") return "dark";
+  return "light";
+}
+
+function applyTheme(theme) {
+  state.theme = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = state.theme;
+  window.localStorage.setItem(THEME_STORAGE_KEY, state.theme);
+  themeToggleButton.textContent = state.theme === "dark" ? "Modo claro" : "Modo oscuro";
+}
+
+function toggleTheme() {
+  applyTheme(state.theme === "dark" ? "light" : "dark");
 }
 
 function escapeHtml(value) {
@@ -163,12 +186,14 @@ function renderCourierOptions() {
 function renderItems() {
   if (!state.items.length) {
     listRoot.innerHTML = `<section class="panel">No hay paquetes visibles para estos filtros.</section>`;
+    updateBackToTopVisibility();
     return;
   }
 
   listRoot.innerHTML = "";
   for (const item of state.items) {
     const node = itemTemplate.content.firstElementChild.cloneNode(true);
+    node.dataset.state = item.status;
     node.querySelector(".tracking").textContent = item.tracking;
     node.querySelector(".owner").textContent = item.owner;
     node.querySelector(".alias").textContent = item.alias || "Sin alias";
@@ -181,9 +206,11 @@ function renderItems() {
     pill.dataset.state = item.status;
 
     const deliveredButton = node.querySelector(".delivered-button");
+    const notPackageButton = node.querySelector(".not-package-button");
     deliveredButton.disabled = !!item.delivered_effective;
     if (item.delivered_effective) deliveredButton.textContent = "Ya entregado";
     deliveredButton.addEventListener("click", async () => {
+      notPackageButton.disabled = true;
       deliveredButton.disabled = true;
       setStatus(`Marcando ${item.tracking} como delivered...`);
       try {
@@ -193,16 +220,48 @@ function renderItems() {
         setStatus(`Paquete ${item.tracking} marcado como delivered.`);
         await loadTrackings();
       } catch (error) {
+        notPackageButton.disabled = false;
         deliveredButton.disabled = false;
         setStatus(`No se pudo marcar ${item.tracking}: ${error.message}`, true);
       }
     });
 
+    notPackageButton.addEventListener("click", async () => {
+      notPackageButton.disabled = true;
+      deliveredButton.disabled = true;
+      setStatus(`Marcando ${item.tracking} como no paquete...`);
+      try {
+        await apiFetch(`/api/telegram/tracking/${encodeURIComponent(item.owner)}/${encodeURIComponent(item.tracking)}/not_package`, {
+          method: "POST"
+        });
+        setStatus(`Paquete ${item.tracking} marcado como no paquete.`);
+        await loadTrackings();
+      } catch (error) {
+        notPackageButton.disabled = false;
+        deliveredButton.disabled = !!item.delivered_effective;
+        setStatus(`No se pudo marcar ${item.tracking} como no paquete: ${error.message}`, true);
+      }
+    });
+
     listRoot.appendChild(node);
   }
+  updateBackToTopVisibility();
+}
+
+function updateBackToTopVisibility() {
+  const cards = listRoot.querySelectorAll(".card");
+  if (!cards.length) {
+    backToTopButton.classList.add("hidden");
+    return;
+  }
+
+  const thresholdCard = cards[1] || cards[0];
+  const threshold = thresholdCard.offsetTop + thresholdCard.offsetHeight;
+  backToTopButton.classList.toggle("hidden", window.scrollY < threshold);
 }
 
 async function bootstrap() {
+  applyTheme(preferredTheme());
   if (tg) {
     tg.ready();
     tg.expand();
@@ -262,5 +321,13 @@ aliasFilter.addEventListener("input", () => {
     loadTrackings().catch((error) => setStatus(`No se pudo aplicar el alias: ${error.message}`, true));
   }, 220);
 });
+
+themeToggleButton.addEventListener("click", toggleTheme);
+
+backToTopButton.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+window.addEventListener("scroll", updateBackToTopVisibility, { passive: true });
 
 bootstrap();

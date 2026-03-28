@@ -71,27 +71,33 @@ body {
 .hero {
   display: flex;
   justify-content: space-between;
-  gap: 24px;
-  padding: 28px;
+  align-items: center;
+  gap: 18px;
+  padding: 22px 24px;
   border: 1px solid var(--line);
   border-radius: var(--radius-xl);
   background: var(--panel);
   box-shadow: var(--shadow);
 }
 
+.hero-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .hero h1 {
   margin: 0;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(2.2rem, 5vw, 4rem);
-  line-height: 0.95;
+  font-size: clamp(1.8rem, 3vw, 2.6rem);
+  line-height: 1;
 }
 
 .hero-text {
-  max-width: 760px;
-  margin: 12px 0 0;
+  max-width: 700px;
+  margin: 8px 0 0;
   color: var(--muted);
-  font-size: 1rem;
-  line-height: 1.5;
+  font-size: 0.96rem;
+  line-height: 1.35;
 }
 
 .hero-actions,
@@ -104,15 +110,18 @@ body {
 
 .hero-actions {
   justify-content: flex-end;
-  align-items: start;
+  align-items: center;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
 }
 
 .hero-action-button {
-  min-height: 40px;
-  padding: 9px 14px;
-  font-size: 14px;
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 13px;
   line-height: 1.1;
   box-shadow: none;
+  white-space: nowrap;
 }
 
 .auth-panel,
@@ -128,8 +137,7 @@ body {
 
 .toolbar {
   display: flex;
-  justify-content: space-between;
-  gap: 18px;
+  gap: 14px;
   align-items: end;
 }
 
@@ -143,14 +151,20 @@ body {
 
 .toolbar-filters {
   flex: 1 1 auto;
+  align-items: end;
 }
 
 .cleanup-details {
-  width: 100%;
+  flex: 0 0 auto;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.34);
   padding: 10px 12px 12px;
+}
+
+.cleanup-details[open] {
+  width: 100%;
+  flex-basis: 100%;
 }
 
 .cleanup-details summary {
@@ -320,7 +334,9 @@ body {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .stat-chip,
@@ -330,8 +346,8 @@ body {
   display: inline-flex;
   align-items: center;
   border-radius: 999px;
-  padding: 8px 12px;
-  font-size: 12px;
+  padding: 7px 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   background: rgba(23, 33, 32, 0.06);
@@ -582,6 +598,10 @@ button:disabled {
     align-items: stretch;
   }
 
+  .hero-actions {
+    flex-wrap: wrap;
+  }
+
   .item-grid {
     grid-template-columns: 1fr;
   }
@@ -591,5 +611,9 @@ button:disabled {
   .item-flags,
   .stats-bar {
     justify-content: start;
+  }
+
+  .stats-bar {
+    margin-left: 0;
   }
 }

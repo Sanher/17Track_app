@@ -160,22 +160,45 @@ class AccountNormalizationTests(unittest.TestCase):
 
         self.assertIn("password_missing", str(ctx.exception))
 
-    def test_temporary_account_block_for_email_is_active_before_deadline(self):
-        blocked = worker.temporary_account_block_for_email(
+    def test_account_block_for_email_keeps_mahler_disabled_until_manual_reenable(self):
+        blocked = worker.account_block_for_email(
             "mahlerthedog@gmail.com",
             today=date(2026, 3, 24),
         )
 
         self.assertIsNotNone(blocked)
-        self.assertEqual(blocked["disabled_until"], "2026-06-24")
+        self.assertEqual(blocked["mode"], "permanent")
+        self.assertEqual(blocked["disabled_until"], "manual_reenable")
 
-    def test_temporary_account_block_for_email_expires_on_deadline(self):
-        blocked = worker.temporary_account_block_for_email(
-            "mahlerthedog@gmail.com",
-            today=date(2026, 6, 24),
-        )
+    def test_load_accounts_skips_permanently_disabled_account(self):
+        with patch.dict(
+            os.environ,
+            {
+                "IMAP_ACCOUNTS_JSON": json.dumps(
+                    [
+                        {
+                            "email": "mahlerthedog@gmail.com",
+                            "owner": "mireia",
+                            "auth": "password",
+                            "password_env": "PW_MAHLER",
+                        },
+                        {
+                            "email": "active@gmail.com",
+                            "owner": "david",
+                            "auth": "password",
+                            "password_env": "PW_ACTIVE",
+                        },
+                    ]
+                ),
+                "PW_MAHLER": "pw_disabled",
+                "PW_ACTIVE": "pw_active",
+            },
+            clear=False,
+        ):
+            accounts = worker.load_accounts()
 
-        self.assertIsNone(blocked)
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["email"], "active@gmail.com")
 
 
 class FilteringTests(unittest.TestCase):
@@ -529,6 +552,27 @@ class ProcessAccountTests(unittest.TestCase):
         self.assertEqual(status_order, "info_received")
         self.assertEqual(status_shipped, "in_transit")
         self.assertEqual(status_ofd, "out_for_delivery")
+
+
+class WorkerMainTests(unittest.TestCase):
+    def test_main_returns_zero_when_some_accounts_fail(self):
+        account = {
+            "owner": "david",
+            "email": "ressetbsg@hotmail.com",
+            "provider": "outlook",
+            "mailbox": "INBOX",
+        }
+
+        with patch.object(worker, "load_dotenv_defaults"), \
+             patch.object(worker, "load_accounts", return_value=[account]), \
+             patch.object(worker, "load_state", return_value={"accounts": {}}), \
+             patch.object(worker, "save_state"), \
+             patch.object(worker, "post_account_binding", return_value={}), \
+             patch.object(worker, "fetch_ignore_rules", return_value=[]), \
+             patch.object(worker, "process_account", side_effect=worker.imaplib.IMAP4.error("AUTH failed")):
+            result = worker.main()
+
+        self.assertEqual(result, 0)
 
 
 if __name__ == "__main__":

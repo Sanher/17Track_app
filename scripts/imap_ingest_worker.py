@@ -40,15 +40,16 @@ DEFAULT_TIMEOUT_SEC = 20
 DEFAULT_DOTENV_PATH = ".env"
 DEFAULT_IGNORE_RULES_TIMEOUT_SEC = 10
 
-# Temporary code-level pause without touching IMAP account config.
-# Re-enable this account on 2026-06-24 by removing this block.
-TEMPORARY_ACCOUNT_BLOCKS: dict[str, dict[str, Any]] = {
+# Code-level account disables without touching IMAP account config.
+# Remove an entry here when the account should become active again.
+PERMANENT_ACCOUNT_BLOCKS: dict[str, dict[str, Any]] = {
     "mahlerthedog@gmail.com": {
-        "disabled_before": date(2026, 6, 24),
-        "disabled_until": "2026-06-24",
-        "reason": "IMAP 4 en pausa temporal hasta 2026-06-24",
+        "disabled_until": "manual_reenable",
+        "reason": "IMAP 4 desactivado por codigo hasta reactivacion manual",
     }
 }
+
+TEMPORARY_ACCOUNT_BLOCKS: dict[str, dict[str, Any]] = {}
 
 TRACKING_STRONG_PATTERNS = [
     re.compile(r"\b1Z[0-9A-Z]{16}\b"),  # UPS
@@ -922,6 +923,29 @@ def temporary_account_block_for_email(email_addr: str, today: date | None = None
     return None
 
 
+def account_block_for_email(email_addr: str, today: date | None = None) -> dict[str, Any] | None:
+    normalized_email = str(email_addr or "").strip().lower()
+    if not normalized_email:
+        return None
+
+    permanent_rule = PERMANENT_ACCOUNT_BLOCKS.get(normalized_email)
+    if permanent_rule:
+        return {
+            "mode": "permanent",
+            "disabled_until": permanent_rule.get("disabled_until"),
+            "reason": permanent_rule.get("reason") or "disabled_by_code",
+        }
+
+    temporary_rule = temporary_account_block_for_email(normalized_email, today=today)
+    if temporary_rule:
+        return {
+            "mode": "temporary",
+            **temporary_rule,
+        }
+
+    return None
+
+
 def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("account_not_object")
@@ -1041,15 +1065,15 @@ def load_accounts() -> list[dict[str, Any]]:
         try:
             normalized = normalize_account(account, default_owner=default_owner)
             if normalized["enabled"]:
-                temporary_block = temporary_account_block_for_email(normalized["email"])
-                if temporary_block:
+                block = account_block_for_email(normalized["email"])
+                if block:
                     log(
                         "info",
-                        "imap_account_skipped_temporarily_disabled",
+                        "imap_account_skipped_disabled_by_code" if block.get("mode") == "permanent" else "imap_account_skipped_temporarily_disabled",
                         idx=idx,
                         email=normalized["email"],
-                        disabled_until=temporary_block.get("disabled_until"),
-                        reason=temporary_block.get("reason"),
+                        disabled_until=block.get("disabled_until"),
+                        reason=block.get("reason"),
                     )
                     continue
                 out.append(normalized)
@@ -1518,7 +1542,7 @@ def main() -> int:
         had_errors=had_errors,
     )
 
-    return 1 if had_errors else 0
+    return 0
 
 
 if __name__ == "__main__":

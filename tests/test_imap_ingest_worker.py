@@ -178,13 +178,13 @@ class AccountNormalizationTests(unittest.TestCase):
                     [
                         {
                             "email": "mahlerthedog@gmail.com",
-                            "owner": "mireia",
+                            "owner": "owner_a",
                             "auth": "password",
                             "password_env": "PW_MAHLER",
                         },
                         {
                             "email": "active@gmail.com",
-                            "owner": "david",
+                            "owner": "owner_b",
                             "auth": "password",
                             "password_env": "PW_ACTIVE",
                         },

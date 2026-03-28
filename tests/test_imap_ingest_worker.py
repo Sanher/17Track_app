@@ -557,7 +557,7 @@ class ProcessAccountTests(unittest.TestCase):
 class WorkerMainTests(unittest.TestCase):
     def test_main_returns_zero_when_some_accounts_fail(self):
         account = {
-            "owner": "david",
+            "owner": "owner_a",
             "email": "ressetbsg@hotmail.com",
             "provider": "outlook",
             "mailbox": "INBOX",

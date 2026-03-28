@@ -754,6 +754,82 @@ app.get("/api/ui/raw", (req, res) => {
   });
 });
 
+function clearOwnerStoreData(store, ownerRaw) {
+  const owner = String(ownerRaw || "").trim().toLowerCase();
+  const o = getOwner(store, owner);
+  if (!o) {
+    return {
+      ok: true,
+      owner,
+      removed: false,
+      removed_trackings: 0,
+      removed_meta: 0,
+      removed_last: 0,
+      removed_imap_accounts: 0,
+      removed_ignore_rules: 0
+    };
+  }
+
+  const removedTrackings = ownerTrackings(o).length;
+  const removedMeta = o?.meta && typeof o.meta === "object" ? Object.keys(o.meta).length : 0;
+  const removedLast = o?.last && typeof o.last === "object" ? Object.keys(o.last).length : 0;
+  const removedImapAccounts = Array.isArray(o?.imap_accounts) ? o.imap_accounts.length : 0;
+  const removedIgnoreRules = Array.isArray(o?.imap_ignore_rules) ? o.imap_ignore_rules.length : 0;
+
+  if (store?.owners && typeof store.owners === "object") {
+    delete store.owners[owner];
+  }
+
+  return {
+    ok: true,
+    owner,
+    removed: true,
+    removed_trackings: removedTrackings,
+    removed_meta: removedMeta,
+    removed_last: removedLast,
+    removed_imap_accounts: removedImapAccounts,
+    removed_ignore_rules: removedIgnoreRules
+  };
+}
+
+app.post("/api/ui/raw/clear_owner", (req, res) => {
+  const access = haOwnerAccessFromHeaders(req.headers);
+  if (!canViewHaIngressDebug(access, RAW_DEBUG_OWNER)) {
+    const payload = {
+      req_id: req.reqId,
+      ha_user_id: access.ha_user_id,
+      display_name: access.display_name,
+      path: req.originalUrl,
+      error: "ha_debug_not_allowed"
+    };
+    logAt("warn", "ha_ingress_raw_debug_denied", payload);
+    postHaAuditLogSafe("warn", "ha_ingress_raw_debug_denied", payload);
+    return res.status(403).json({ ok: false, error: "ha_debug_not_allowed" });
+  }
+
+  const store = loadStore();
+  const owner = RAW_DEBUG_OWNER;
+  const result = clearOwnerStoreData(store, owner);
+  saveStore(store);
+
+  const payload = {
+    req_id: req.reqId,
+    ha_user_id: access.ha_user_id,
+    display_name: access.display_name,
+    owner,
+    removed: result.removed,
+    removed_trackings: result.removed_trackings,
+    removed_meta: result.removed_meta,
+    removed_last: result.removed_last,
+    removed_imap_accounts: result.removed_imap_accounts,
+    removed_ignore_rules: result.removed_ignore_rules
+  };
+  logAt("warn", "ha_ingress_raw_debug_owner_cleared", payload);
+  postHaAuditLogSafe("warn", "ha_ingress_raw_debug_owner_cleared", payload);
+
+  return res.json(result);
+});
+
 app.post("/api/telegram/imap/refresh", (req, res) => {
   const result = triggerManualImapRefresh({
     source: "telegram_miniapp",
@@ -3347,6 +3423,7 @@ module.exports = {
     splitLogLines,
     ownerTrackings,
     trackingSource,
+    clearOwnerStoreData,
     sanitizeStore,
     reconcileImapAccountOwnership,
     normalizeHaOwnerAccessEntry,

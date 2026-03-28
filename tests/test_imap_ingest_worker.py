@@ -279,6 +279,13 @@ class FilteringTests(unittest.TestCase):
                 body="empleo y vacantes recomendadas",
             )
         )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
+                sender="Promo <rewards@example.com>",
+                subject="¡Canjea tus pasos antes de la medianoche!",
+                body="Reclama tu premio esta noche",
+            )
+        )
         self.assertFalse(
             worker.looks_like_non_package_message(
                 sender="Amazon <shipment-tracking@amazon.es>",
@@ -309,6 +316,22 @@ class ExtractionAndAuthTests(unittest.TestCase):
 
         self.assertNotIn(weak_token, without_context)
         self.assertIn(weak_token, with_context)
+
+    def test_extract_tracking_numbers_does_not_treat_generic_order_word_as_shipping_context(self):
+        found = worker.extract_tracking_numbers(
+            subject="La Semana Santa sabe a bacalao... 💛",
+            body="Tu pedido WEB-9102755 sigue pendiente",
+        )
+
+        self.assertEqual(found, [])
+
+    def test_extract_tracking_numbers_rejects_hex_noise_even_with_shipping_context(self):
+        found = worker.extract_tracking_numbers(
+            subject="Seguimiento disponible",
+            body="Seguimiento del envio B8531D5B9FC4 y F907C830-34E1-485B-ABE8",
+        )
+
+        self.assertEqual(found, [])
 
     def test_extract_tracking_numbers_accepts_weak_token_from_official_carrier_sender(self):
         weak_token = "GLS-ES-12345678"
@@ -346,6 +369,12 @@ class ExtractionAndAuthTests(unittest.TestCase):
         self.assertTrue(flags["dkim_pass"])
         self.assertTrue(flags["spf_pass"])
         self.assertFalse(flags["dmarc_pass"])
+
+    def test_resolve_sender_header_uses_reply_to_when_from_missing(self):
+        msg = EmailMessage()
+        msg["Reply-To"] = "Promo <rewards@example.com>"
+
+        self.assertEqual(worker.resolve_sender_header(msg), "Promo <rewards@example.com>")
 
     def test_guess_carrier_does_not_prefer_generic_correos_from_body(self):
         carrier = worker.guess_carrier(

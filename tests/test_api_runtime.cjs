@@ -329,6 +329,40 @@ test("canViewHaIngressDebug only allows ingress users scoped to the raw owner", 
   );
 });
 
+test("clearOwnerStoreData removes all owner data in one step", () => {
+  const store = {
+    owners: {
+      owner_a: {
+        trackings: ["ABC123", "XYZ789"],
+        meta: {
+          ABC123: { source: "imap" },
+          XYZ789: { source: "imap" }
+        },
+        last: {
+          ABC123: { number: "ABC123" },
+          XYZ789: { number: "XYZ789" }
+        },
+        imap_accounts: [{ email: "owner_a@gmail.com", provider: "gmail", enabled: true }],
+        imap_ignore_rules: [{ id: "rule_1", kind: "subject_terms_all", description_terms: ["foo"] }]
+      }
+    }
+  };
+
+  const result = _test.clearOwnerStoreData(store, "owner_a");
+
+  assert.deepEqual(result, {
+    ok: true,
+    owner: "owner_a",
+    removed: true,
+    removed_trackings: 2,
+    removed_meta: 2,
+    removed_last: 2,
+    removed_imap_accounts: 1,
+    removed_ignore_rules: 1
+  });
+  assert.equal(store.owners.owner_a, undefined);
+});
+
 test("normalizeManualTrackingStatus accepts ingress labels and aliases", () => {
   assert.equal(_test.normalizeManualTrackingStatus("en reparto"), "out_for_delivery");
   assert.equal(_test.normalizeManualTrackingStatus("delivered"), "delivered");

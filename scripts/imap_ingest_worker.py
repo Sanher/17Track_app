@@ -74,7 +74,6 @@ SHIPPING_KEYWORDS = {
     "reparto",
     "entrega",
     "paquete",
-    "pedido",
 }
 
 TRACKING_STOPWORDS = {
@@ -265,6 +264,8 @@ NON_PACKAGE_KEYWORDS_ANY = [
     "vacante",
     "vacantes",
     "empleo",
+    "canjea tus pasos",
+    "antes de la medianoche",
 ]
 
 
@@ -483,6 +484,14 @@ def decode_mime_header(raw: Any) -> str:
         return str(raw)
 
 
+def resolve_sender_header(msg: Any) -> str:
+    for header in ("From", "Sender", "Reply-To", "Return-Path"):
+        value = decode_mime_header(msg.get(header))
+        if str(value or "").strip():
+            return str(value).strip()
+    return ""
+
+
 def decode_bytes(raw: bytes | None, charset: str | None) -> str:
     if raw is None:
         return ""
@@ -596,6 +605,13 @@ def looks_like_tracking_candidate(token: str) -> bool:
     return True
 
 
+def looks_like_noise_weak_token(token: str) -> bool:
+    compact = token.replace("-", "")
+    if len(compact) < 10:
+        return False
+    return bool(re.fullmatch(r"[0-9A-F]+", compact))
+
+
 def extract_tracking_numbers(subject: str, body: str, sender: str = "") -> list[str]:
     source = f"{subject}\n{body}".upper()
     lower = source.lower()
@@ -623,6 +639,8 @@ def extract_tracking_numbers(subject: str, body: str, sender: str = "") -> list[
     trusted_sender = official_carrier_from_sender(sender)
     if not is_amazon_sender and (trusted_sender or has_shipping_context(lower)):
         for match in TRACKING_WEAK_PATTERN.findall(source):
+            if not trusted_sender and looks_like_noise_weak_token(normalize_tracking(match)):
+                continue
             add_candidate(match)
 
     return found
@@ -1124,7 +1142,7 @@ def process_account(
             max_seen_uid = max(max_seen_uid, uid)
             msg = fetch_message(client, uid=uid)
             subject = decode_mime_header(msg.get("Subject"))
-            sender = decode_mime_header(msg.get("From"))
+            sender = resolve_sender_header(msg)
             date_iso = parse_message_date(msg.get("Date"))
             body = extract_message_text(msg)
             auth_flags = message_auth_flags(msg)

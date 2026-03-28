@@ -52,6 +52,7 @@ const addTrackingCancelButton = document.getElementById("addTrackingCancelButton
 const addTrackingSaveButton = document.getElementById("addTrackingSaveButton");
 const rawDebugDialog = document.getElementById("rawDebugDialog");
 const rawDebugOutput = document.getElementById("rawDebugOutput");
+const rawDebugClearOwnerButton = document.getElementById("rawDebugClearOwnerButton");
 
 const bulkButtons = [
   selectVisibleButton,
@@ -362,6 +363,12 @@ async function loadRawDebugData() {
   return apiFetch("/api/ui/raw");
 }
 
+async function clearRawDebugOwner() {
+  return apiFetch("/api/ui/raw/clear_owner", {
+    method: "POST"
+  });
+}
+
 async function updateDeliveredOverride(owner, tracking, delivered) {
   return apiFetch(`/api/owner/${encodeURIComponent(owner)}/tracking/${encodeURIComponent(tracking)}/override`, {
     method: "POST",
@@ -402,6 +409,23 @@ async function confirmBulkAction(action, count) {
   };
 
   const copy = copyByAction[action];
+  if (!copy || !confirmDialog || typeof confirmDialog.showModal !== "function") return true;
+
+  confirmDialogTitle.textContent = copy.title;
+  confirmDialogMessage.textContent = copy.message;
+  confirmDialogAccept.textContent = copy.button;
+
+  return new Promise((resolve) => {
+    const handleClose = () => {
+      confirmDialog.removeEventListener("close", handleClose);
+      resolve(confirmDialog.returnValue === "accept");
+    };
+    confirmDialog.addEventListener("close", handleClose, { once: true });
+    confirmDialog.showModal();
+  });
+}
+
+async function confirmDangerousAction(copy) {
   if (!copy || !confirmDialog || typeof confirmDialog.showModal !== "function") return true;
 
   confirmDialogTitle.textContent = copy.title;
@@ -668,6 +692,7 @@ function openAddTrackingDialog() {
 async function openRawDebugDialog() {
   if (!rawDebugDialog || typeof rawDebugDialog.showModal !== "function") return;
   rawDebugOutput.textContent = "Cargando...";
+  if (rawDebugClearOwnerButton) rawDebugClearOwnerButton.disabled = false;
   rawDebugDialog.showModal();
   try {
     const payload = await loadRawDebugData();
@@ -710,6 +735,31 @@ if (addTrackingButton) {
 if (rawDebugButton) {
   rawDebugButton.addEventListener("click", () => {
     openRawDebugDialog();
+  });
+}
+
+if (rawDebugClearOwnerButton) {
+  rawDebugClearOwnerButton.addEventListener("click", async () => {
+    const accepted = await confirmDangerousAction({
+      title: "Confirmar limpieza del owner",
+      message: "Vas a borrar todos los paquetes, metadatos y reglas IMAP del owner con debug. Esta accion no se puede deshacer desde la UI.",
+      button: "Limpiar owner"
+    });
+    if (!accepted) return;
+
+    try {
+      rawDebugClearOwnerButton.disabled = true;
+      rawDebugOutput.textContent = "Limpiando owner...";
+      const result = await clearRawDebugOwner();
+      rawDebugOutput.textContent = JSON.stringify(result, null, 2);
+      setStatus(`Owner limpiado. Trackings borrados: ${result.removed_trackings || 0}.`);
+      await loadOwners();
+    } catch (error) {
+      rawDebugOutput.textContent = `No se pudo limpiar el owner: ${error.message}`;
+      setStatus(`No se pudo limpiar el owner: ${error.message}`, "error");
+    } finally {
+      rawDebugClearOwnerButton.disabled = false;
+    }
   });
 }
 

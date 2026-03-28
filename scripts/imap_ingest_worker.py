@@ -1188,6 +1188,21 @@ def process_account(
             status, status_note = classify_status(subject=subject, body=body, sender=sender)
             description = subject.strip()[:180] if subject.strip() else status_note
             carrier_name = guess_carrier(sender=sender, subject=subject, body=body)
+            if len(trackings) > 1 or not sender.strip() or not carrier_name:
+                log(
+                    "warn",
+                    "imap_message_suspicious_candidates",
+                    owner=account["owner"],
+                    email=account["email"],
+                    uid=uid,
+                    sender=str(sender or "").strip() or None,
+                    subject=str(subject or "").strip()[:180] or None,
+                    trackings=trackings[:12],
+                    trackings_total=len(trackings),
+                    shipping_context=has_shipping_context(f"{subject}\n{body}"),
+                    trusted_sender=bool(official_amazon_sender(sender) or official_carrier_from_sender(sender)),
+                    carrier_name=carrier_name,
+                )
 
             for tracking in trackings:
                 item = {

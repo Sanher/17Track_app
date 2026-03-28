@@ -397,6 +397,14 @@ class ExtractionAndAuthTests(unittest.TestCase):
 
         self.assertEqual(found, [])
 
+    def test_extract_tracking_numbers_rejects_quoted_printable_slash_noise(self):
+        found = worker.extract_tracking_numbers(
+            subject="¡Canjea tus pasos antes de la medianoche!",
+            body="Seguimiento disponible 2FID1454213029 562EAC2D6C67 EED15C120181",
+        )
+
+        self.assertEqual(found, [])
+
     def test_extract_tracking_numbers_rejects_web_slug_noise(self):
         found = worker.extract_tracking_numbers(
             subject="Actualizacion de pedido",

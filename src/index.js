@@ -2868,6 +2868,7 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
   const o = ensureOwnerShape(store, owner);
   const now = new Date();
   const accepted = [];
+  const acceptedSamples = [];
   const reconciledAccounts = new Set();
   const reconciliationEvents = [];
   let skipped_invalid = 0;
@@ -2909,6 +2910,14 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
     const one = normalizeImapSnapshot(item, tracking, accountEmail);
     saveTrackingLastSnapshot(o, tracking, one, null, now);
     accepted.push({ tracking, source: "imap", imap_account: accountEmail || null });
+    if (acceptedSamples.length < 5) {
+      acceptedSamples.push({
+        tracking,
+        imap_account: accountEmail || null,
+        subject: String(one?.latest?.subject || item?.subject || "").trim() || null,
+        sender: String(one?.latest?.sender || item?.sender || "").trim() || null,
+      });
+    }
   }
 
   o.last_imap_ingest_at = now.toISOString();
@@ -2944,7 +2953,8 @@ app.post("/api/owner/:owner/imap/ingest", (req, res) => {
     req_id: req.reqId,
     owner,
     ingested: accepted.length,
-    skipped_invalid
+    skipped_invalid,
+    accepted_samples: acceptedSamples
   });
   postHaAuditLogSafe(ingestLevel, "imap_ingest_done", {
     owner,

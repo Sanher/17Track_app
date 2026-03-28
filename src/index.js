@@ -1006,7 +1006,6 @@ function inferImapProvider(email) {
   if (!e.includes("@")) return "generic";
   const domain = e.split("@")[1] || "";
   if (domain.includes("gmail.com") || domain.includes("googlemail.com")) return "gmail";
-  if (domain.includes("outlook.") || domain.includes("hotmail.") || domain.includes("live.") || domain.includes("microsoft")) return "outlook";
   return "generic";
 }
 
@@ -1578,7 +1577,7 @@ function normalizeImapAccountEntry(a) {
   const email = String(a?.email || "").trim().toLowerCase();
   if (!email || !email.includes("@")) return null;
   const providerRaw = String(a?.provider || "").trim().toLowerCase();
-  const provider = providerRaw || inferImapProvider(email);
+  const provider = providerRaw === "outlook" ? "generic" : (providerRaw || inferImapProvider(email));
   const enabled = maybeBool(a?.enabled);
   return {
     email,

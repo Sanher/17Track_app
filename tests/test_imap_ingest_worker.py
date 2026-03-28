@@ -200,6 +200,35 @@ class AccountNormalizationTests(unittest.TestCase):
         self.assertEqual(len(accounts), 1)
         self.assertEqual(accounts[0]["email"], "active@gmail.com")
 
+    def test_load_accounts_skips_outlook_accounts_without_breaking_worker(self):
+        with patch.dict(
+            os.environ,
+            {
+                "IMAP_ACCOUNTS_JSON": json.dumps(
+                    [
+                        {
+                            "email": "ressetbsg@hotmail.com",
+                            "owner": "owner_a",
+                            "provider": "outlook",
+                            "auth": "oauth2",
+                        },
+                        {
+                            "email": "active@gmail.com",
+                            "owner": "owner_b",
+                            "auth": "password",
+                            "password_env": "PW_ACTIVE",
+                        },
+                    ]
+                ),
+                "PW_ACTIVE": "pw_active",
+            },
+            clear=False,
+        ):
+            accounts = worker.load_accounts()
+
+        self.assertEqual(len(accounts), 1)
+        self.assertEqual(accounts[0]["email"], "active@gmail.com")
+
 
 class FilteringTests(unittest.TestCase):
     def test_message_passes_filters_for_amazon_mislata(self):
@@ -558,8 +587,8 @@ class WorkerMainTests(unittest.TestCase):
     def test_main_returns_zero_when_some_accounts_fail(self):
         account = {
             "owner": "owner_a",
-            "email": "ressetbsg@hotmail.com",
-            "provider": "outlook",
+            "email": "generic@example.com",
+            "provider": "generic",
             "mailbox": "INBOX",
         }
 

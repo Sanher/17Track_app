@@ -99,16 +99,6 @@ Configura `IMAP_ACCOUNTS_JSON` con un objeto por cuenta:
     "owner": "owner_a",
     "auth": "password",
     "password_env": "IMAP_GMAIL_1_APP_PASSWORD"
-  },
-  {
-    "email": "correo6@outlook.com",
-    "provider": "outlook",
-    "owner": "owner_b",
-    "auth": "oauth2",
-    "tenant": "consumers",
-    "client_id_env": "OUTLOOK_IMAP_CLIENT_ID",
-    "client_secret_env": "OUTLOOK_IMAP_CLIENT_SECRET",
-    "refresh_token_env": "OUTLOOK_IMAP_REFRESH_TOKEN"
   }
 ]
 ```
@@ -117,7 +107,7 @@ Notas:
 
 - Gmail: usa app passwords (`auth=password`) y guarda el valor real en la env var indicada por `password_env`.
 - `password_env` debe contener el nombre de variable (ej: `IMAP_GMAIL_1_APP_PASSWORD`), no la password literal.
-- Outlook: usa OAuth2 (`auth=oauth2`) con `client_id`, `client_secret` y `refresh_token` en env vars.
+- Outlook/Hotmail ya no se leen por IMAP desde esta app. Si necesitas esos correos, redirígelos automáticamente a una cuenta Gmail que sí esté en `IMAP_ACCOUNTS_JSON`.
 - No subas secretos al repo: usa `.env` local o secretos del add-on en Home Assistant.
 
 Filtros opcionales por cuenta (`filters` dentro de cada objeto):

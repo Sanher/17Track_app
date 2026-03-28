@@ -24,7 +24,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -362,8 +362,6 @@ def infer_provider(email_addr: str) -> str:
     domain = email_addr.split("@", 1)[1]
     if "gmail.com" in domain or "googlemail.com" in domain:
         return "gmail"
-    if "outlook." in domain or "hotmail." in domain or "live." in domain or "microsoft" in domain:
-        return "outlook"
     return "generic"
 
 
@@ -818,30 +816,6 @@ def parse_uid_list(data: list[Any]) -> list[int]:
     return out
 
 
-def fetch_outlook_access_token(account: dict[str, Any], timeout_sec: int) -> str:
-    payload = {
-        "client_id": account["client_id"],
-        "client_secret": account["client_secret"],
-        "refresh_token": account["refresh_token"],
-        "grant_type": "refresh_token",
-        "scope": account["scope"],
-    }
-    encoded = urlencode(payload).encode("utf-8")
-    req = Request(
-        account["token_url"],
-        data=encoded,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    with urlopen(req, timeout=timeout_sec) as res:
-        body = res.read()
-    decoded = json.loads(body.decode("utf-8", errors="replace"))
-    token = str(decoded.get("access_token") or "").strip()
-    if not token:
-        raise RuntimeError("oauth_access_token_missing")
-    return token
-
-
 def login_imap(account: dict[str, Any], timeout_sec: int) -> imaplib.IMAP4_SSL:
     host = account["host"]
     port = account["port"]
@@ -849,12 +823,6 @@ def login_imap(account: dict[str, Any], timeout_sec: int) -> imaplib.IMAP4_SSL:
 
     if account["auth"] == "password":
         client.login(account["username"], account["password"])
-        return client
-
-    if account["auth"] == "oauth2":
-        token = fetch_outlook_access_token(account, timeout_sec=timeout_sec)
-        auth_string = f"user={account['username']}\x01auth=Bearer {token}\x01\x01"
-        client.authenticate("XOAUTH2", lambda _unused: auth_string.encode("utf-8"))
         return client
 
     raise RuntimeError(f"auth_not_supported:{account['auth']}")
@@ -961,12 +929,12 @@ def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
         raise ValueError("owner_missing")
     if not owner:
         owner = "_disabled"
+    if provider == "outlook" or "hotmail." in email_addr or "outlook." in email_addr or "live." in email_addr:
+        raise ValueError("provider_not_supported:outlook")
     host = str(raw.get("host") or "").strip()
     if not host:
         if provider == "gmail":
             host = "imap.gmail.com"
-        elif provider == "outlook":
-            host = "outlook.office365.com"
         else:
             raise ValueError("host_missing_for_generic_provider")
 
@@ -975,7 +943,7 @@ def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
     mailbox = str(raw.get("mailbox") or "INBOX").strip()
     auth = str(raw.get("auth") or "").strip().lower()
     if not auth:
-        auth = "oauth2" if provider == "outlook" else "password"
+        auth = "password"
     filters_raw = raw.get("filters") if isinstance(raw.get("filters"), dict) else {}
     filters = {
         "only_amazon": parse_bool(filters_raw.get("only_amazon"), default=False),
@@ -1013,33 +981,6 @@ def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
         if not password:
             raise ValueError("password_missing")
         out["password"] = password
-    elif auth == "oauth2":
-        tenant = str(raw.get("tenant") or "consumers").strip()
-        token_url = str(raw.get("token_url") or "").strip()
-        if not token_url:
-            token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-
-        client_id = resolve_secret(raw.get("client_id"), raw.get("client_id_env"))
-        client_secret = resolve_secret(raw.get("client_secret"), raw.get("client_secret_env"))
-        refresh_token = resolve_secret(raw.get("refresh_token"), raw.get("refresh_token_env"))
-        scope = str(raw.get("scope") or "https://outlook.office.com/IMAP.AccessAsUser.All offline_access").strip()
-
-        missing = []
-        if not client_id:
-            missing.append("client_id")
-        if not client_secret:
-            missing.append("client_secret")
-        if not refresh_token:
-            missing.append("refresh_token")
-        if missing:
-            raise ValueError(f"oauth_missing:{','.join(missing)}")
-
-        out["tenant"] = tenant
-        out["token_url"] = token_url
-        out["client_id"] = client_id
-        out["client_secret"] = client_secret
-        out["refresh_token"] = refresh_token
-        out["scope"] = scope
     else:
         raise ValueError(f"auth_not_supported:{auth}")
 
@@ -1080,6 +1021,11 @@ def load_accounts() -> list[dict[str, Any]]:
             else:
                 log("info", "imap_account_skipped_disabled", idx=idx, email=normalized["email"])
         except Exception as exc:
+            error_text = str(exc)
+            if error_text.startswith("provider_not_supported:") or error_text.startswith("auth_not_supported:oauth2"):
+                email = str(account.get("email") or "").strip().lower() if isinstance(account, dict) else ""
+                log("warn", "imap_account_skipped_unsupported", idx=idx, email=email, error=error_text)
+                continue
             raise RuntimeError(f"Invalid account at index {idx}: {exc}") from exc
     return out
 

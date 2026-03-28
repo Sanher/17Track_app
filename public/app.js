@@ -299,7 +299,6 @@ function renderStats(owners) {
   const delivered = flatItems.filter((item) => item.delivered_effective).length;
   const pending = flatItems.length - delivered;
   const chips = [
-    `Owners: ${owners.length}`,
     `Visibles: ${flatItems.length}`,
     `Pendientes: ${pending}`,
     `Delivered: ${delivered}`,

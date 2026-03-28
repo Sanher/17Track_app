@@ -484,7 +484,16 @@ def decode_mime_header(raw: Any) -> str:
 
 
 def resolve_sender_header(msg: Any) -> str:
-    for header in ("From", "Sender", "Reply-To", "Return-Path"):
+    for header in (
+        "From",
+        "Sender",
+        "Reply-To",
+        "Return-Path",
+        "Resent-From",
+        "X-Original-From",
+        "X-Forwarded-For",
+        "Envelope-From",
+    ):
         value = decode_mime_header(msg.get(header))
         if str(value or "").strip():
             return str(value).strip()
@@ -606,9 +615,29 @@ def looks_like_tracking_candidate(token: str) -> bool:
 
 def looks_like_noise_weak_token(token: str) -> bool:
     compact = token.replace("-", "")
-    if len(compact) < 10:
-        return False
-    return bool(re.fullmatch(r"[0-9A-F]+", compact))
+    if len(compact) >= 10 and re.fullmatch(r"[0-9A-F]+", compact):
+        return True
+
+    upper = token.upper()
+    digits = sum(c.isdigit() for c in upper)
+    letters = sum(c.isalpha() for c in upper)
+    parts = [part for part in upper.split("-") if part]
+    alpha_parts = sum(part.isalpha() for part in parts)
+
+    # URL-encoded fragments and slug-like restaurant/menu paths were leaking
+    # through the weak-token heuristic as fake trackings.
+    if upper.startswith(("252F", "25252F", "2F", "HTTP", "WWW")):
+        return True
+    if upper.startswith("WEB-") and digits <= 7:
+        return True
+    if len(parts) >= 3 and alpha_parts >= 2 and digits <= 6:
+        return True
+    if letters >= max(8, digits * 2) and digits <= 6:
+        return True
+    if re.fullmatch(r"[A-Z]{2,4}[0-9]{6,8}", upper):
+        return True
+
+    return False
 
 
 def extract_tracking_numbers(subject: str, body: str, sender: str = "") -> list[str]:

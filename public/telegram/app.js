@@ -271,7 +271,7 @@ async function bootstrap() {
   try {
     state.me = await ensureTelegramSession();
     setAccessState(true);
-    userMeta.textContent = `Acceso para ${state.me.display_name} · owners: ${(state.me.owners || []).join(", ")}`;
+    userMeta.textContent = `Acceso para ${state.me.display_name}`;
     setStatus("Cargando mini app...");
     await loadTrackings();
     setStatus("");

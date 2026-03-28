@@ -356,7 +356,7 @@ class ExtractionAndAuthTests(unittest.TestCase):
         self.assertIn("1Z999AA10123456784", found)
 
     def test_extract_tracking_numbers_weak_tokens_require_shipping_context(self):
-        weak_token = "AMZ-ORDER-123456"
+        weak_token = "PKG123456789"
         without_context = worker.extract_tracking_numbers(
             subject=f"Codigo {weak_token}",
             body="mensaje de prueba sin contexto",
@@ -381,6 +381,26 @@ class ExtractionAndAuthTests(unittest.TestCase):
         found = worker.extract_tracking_numbers(
             subject="Seguimiento disponible",
             body="Seguimiento del envio B8531D5B9FC4 y F907C830-34E1-485B-ABE8",
+        )
+
+        self.assertEqual(found, [])
+
+    def test_extract_tracking_numbers_rejects_discount_slug_noise_even_with_shipping_context(self):
+        found = worker.extract_tracking_numbers(
+            subject="Hasta un 30 % de descuento 🚲",
+            body=(
+                "Tu pedido ya esta listo. Visita %2Frestaurants-cafe-pans-ruzafa-by "
+                "PANS-AND-COMPANY-46002 252FMENU 252FRESTAURANTS-TURTLE-SMASH- "
+                "y ESB86008539 para seguir disfrutando."
+            ),
+        )
+
+        self.assertEqual(found, [])
+
+    def test_extract_tracking_numbers_rejects_web_slug_noise(self):
+        found = worker.extract_tracking_numbers(
+            subject="Actualizacion de pedido",
+            body="Seguimiento disponible para WEB-9102755 en tu panel",
         )
 
         self.assertEqual(found, [])
@@ -427,6 +447,12 @@ class ExtractionAndAuthTests(unittest.TestCase):
         msg["Reply-To"] = "Promo <rewards@example.com>"
 
         self.assertEqual(worker.resolve_sender_header(msg), "Promo <rewards@example.com>")
+
+    def test_resolve_sender_header_uses_x_original_from_when_standard_headers_missing(self):
+        msg = EmailMessage()
+        msg["X-Original-From"] = "Carrier <noreply@example.com>"
+
+        self.assertEqual(worker.resolve_sender_header(msg), "Carrier <noreply@example.com>")
 
     def test_guess_carrier_does_not_prefer_generic_correos_from_body(self):
         carrier = worker.guess_carrier(

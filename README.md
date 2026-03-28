@@ -11,7 +11,7 @@ Servidor Node.js para gestionar paquetes por owner (por ejemplo `owner_a` y `own
 - Override manual de `delivered` por tracking.
 - Refresco manual y refresco condicional en background.
 - Logs estructurados para requests y auditoría.
-- Worker IMAP para ingesta de eventos desde buzones (Gmail/Outlook).
+- Worker IMAP para ingesta de eventos desde buzones soportados por IMAP (principalmente Gmail y proveedores genéricos).
 - Interfaz web ligera para revisar paquetes por owner y corregir alias/courier.
 
 ## Requisitos
@@ -78,6 +78,30 @@ Integración con Home Assistant (notificaciones):
 El worker lee buzones y empuja eventos a `/api/owner/:owner/imap/ingest`.
 `source=imap` es la única fuente activa.
 En primera ejecución, el lookback por defecto queda limitado a los últimos dos meses.
+
+### Contrato con el add-on
+
+El add-on de Home Assistant consume este repo por tag y usa directamente el worker publicado aquí.
+
+- `scripts/imap_ingest_worker.py` forma parte del contrato público del repo para el add-on.
+- Cada cambio funcional del worker debe ir acompañado de una nueva versión/tag publicada de la app.
+- No mover, renombrar ni eliminar `scripts/imap_ingest_worker.py` sin coordinarlo con el repo del add-on.
+- `/api/_build` debe seguir devolviendo la versión publicada para poder verificar la build efectiva.
+- Si cambian heurísticas, cuentas bloqueadas, providers soportados, logs o payloads del worker, debe quedar trazabilidad en commits y releases.
+
+Contrato operativo esperado por el add-on:
+
+- El repo taggeado debe contener `scripts/imap_ingest_worker.py`.
+- El worker debe seguir siendo ejecutable con `python3 /app/scripts/imap_ingest_worker.py`.
+- El backend debe seguir exponiendo:
+  - `POST /api/owner/:owner/imap/ingest`
+  - `GET /api/owner/:owner/imap/ignore_rules`
+
+Importante:
+
+- El add-on ya no mantiene un override/local patch del worker.
+- Si se corrige algo en el worker y no se publica una nueva tag de `17Track_app`, el add-on no recogerá ese cambio.
+- En resumen: cambio en worker => nueva versión/tag de la app.
 
 ## UI web
 
@@ -153,6 +177,7 @@ Ejemplo cuenta con filtro "solo Amazon para Mislata":
 - `GET /api/owner/:owner/imap/accounts`
 - `POST /api/owner/:owner/imap/accounts`
 - `DELETE /api/owner/:owner/imap/accounts/:email`
+- `GET /api/owner/:owner/imap/ignore_rules`
 - `POST /api/owner/:owner/imap/ingest`
 - `PATCH /api/owner/:owner/tracking/:tracking/meta`
 

@@ -333,6 +333,20 @@ class FilteringTests(unittest.TestCase):
         )
         self.assertTrue(
             worker.looks_like_non_package_message(
+                sender="LinkedIn <updates-noreply@linkedin.com>",
+                subject="Andrea Pascual acaba de publicar contenido nuevo",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
+                sender='"tecnoempleo.com" <alertas@push.tecnoempleo.com>',
+                subject="Nuevas alertas de empleo en Segovia",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
                 sender="Promo <rewards@example.com>",
                 subject="¡Canjea tus pasos antes de la medianoche!",
                 body="Reclama tu premio esta noche",

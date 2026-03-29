@@ -269,6 +269,12 @@ NON_PACKAGE_KEYWORDS_ANY = [
     "antes de la medianoche",
 ]
 
+NON_PACKAGE_SENDER_DOMAINS = [
+    "linkedin.com",
+    "linkedinemail.com",
+    "tecnoempleo.com",
+]
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -772,6 +778,12 @@ def message_matches_ignore_rule(
 
 
 def looks_like_non_package_message(sender: str, subject: str, body: str) -> bool:
+    sender_domain = first_email_domain(sender)
+    if sender_domain and any(
+        sender_domain == domain or sender_domain.endswith(f".{domain}")
+        for domain in NON_PACKAGE_SENDER_DOMAINS
+    ):
+        return True
     text = f"{sender}\n{subject}\n{body}".lower()
     if has_shipping_context(text):
         return False

@@ -269,10 +269,22 @@ NON_PACKAGE_KEYWORDS_ANY = [
     "antes de la medianoche",
 ]
 
+NON_PACKAGE_STRONG_KEYWORDS_ANY = [
+    "cuenta de adobe",
+    "reseña en google",
+    "lista de deseados de steam",
+]
+
+NON_PACKAGE_SENDER_EMAILS = [
+    "mail@mail.adobe.com",
+    "google-maps-noreply@google.com",
+]
+
 NON_PACKAGE_SENDER_DOMAINS = [
     "linkedin.com",
     "linkedinemail.com",
     "tecnoempleo.com",
+    "mail.adobe.com",
 ]
 
 
@@ -778,13 +790,18 @@ def message_matches_ignore_rule(
 
 
 def looks_like_non_package_message(sender: str, subject: str, body: str) -> bool:
+    sender_email = first_email_address(sender)
     sender_domain = first_email_domain(sender)
+    if sender_email and sender_email in NON_PACKAGE_SENDER_EMAILS:
+        return True
     if sender_domain and any(
         sender_domain == domain or sender_domain.endswith(f".{domain}")
         for domain in NON_PACKAGE_SENDER_DOMAINS
     ):
         return True
     text = f"{sender}\n{subject}\n{body}".lower()
+    if any(keyword in text for keyword in NON_PACKAGE_STRONG_KEYWORDS_ANY):
+        return True
     if has_shipping_context(text):
         return False
     if guess_carrier(sender, subject, body):

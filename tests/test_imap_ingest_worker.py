@@ -347,6 +347,27 @@ class FilteringTests(unittest.TestCase):
         )
         self.assertTrue(
             worker.looks_like_non_package_message(
+                sender="Adobe <mail@mail.adobe.com>",
+                subject="Información importante sobre tu cuenta de Adobe",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
+                sender="Google Maps <google-maps-noreply@google.com>",
+                subject="Óptica Luxot ha respondido a tu reseña en Google",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
+                sender="Steam <noreply@steampowered.com>",
+                subject="¡Startup Company y otros 4 artículos de tu lista de deseados de Steam están en oferta!",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
                 sender="Promo <rewards@example.com>",
                 subject="¡Canjea tus pasos antes de la medianoche!",
                 body="Reclama tu premio esta noche",

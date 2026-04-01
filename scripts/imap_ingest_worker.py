@@ -255,10 +255,6 @@ AMAZON_SHIPPED_KEYWORDS = [
 ]
 
 NON_PACKAGE_KEYWORDS_ANY = [
-    "euromillones",
-    "loteria",
-    "lottery",
-    "boleto",
     "linkedin",
     "job alert",
     "job alerts",
@@ -270,6 +266,11 @@ NON_PACKAGE_KEYWORDS_ANY = [
 ]
 
 NON_PACKAGE_STRONG_KEYWORDS_ANY = [
+    "euromillones",
+    "loteria",
+    "lottery",
+    "boleto",
+    "tulotero",
     "cuenta de adobe",
     "reseña en google",
     "lista de deseados de steam",

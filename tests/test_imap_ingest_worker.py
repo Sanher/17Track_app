@@ -326,6 +326,13 @@ class FilteringTests(unittest.TestCase):
         )
         self.assertTrue(
             worker.looks_like_non_package_message(
+                sender="TuLotero <info_at_tulotero_es_7b2vrn949f_41b42ede@privaterelay.appleid.com>",
+                subject="Boleto Euromillones ZQJRNAT48233 validado",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
                 sender="LinkedIn <jobs-noreply@linkedin.com>",
                 subject="Job alert: nuevas vacantes",
                 body="empleo y vacantes recomendadas",

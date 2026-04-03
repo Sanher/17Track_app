@@ -466,34 +466,62 @@ function appendSetCookie(res, cookieValue) {
   res.setHeader("Set-Cookie", next);
 }
 
-function requestWantsSecureCookie(req) {
-  if (req.secure) return true;
-  const forwardedProto = String(req.get("x-forwarded-proto") || "").trim().toLowerCase();
-  return forwardedProto === "https";
+function parseOriginHeader(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch (_e) {
+    return "";
+  }
 }
 
-function setTelegramSessionCookie(req, res, token) {
+function requestOriginFromHeaders(req) {
+  const proto = String(req.get("x-forwarded-proto") || (req.secure ? "https" : "http"))
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  const host = String(req.get("x-forwarded-host") || req.get("host") || "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+  if (!proto || !host) return "";
+  return `${proto}://${host}`;
+}
+
+function requestWantsSecureCookie(req, opts = {}) {
+  const publicBaseUrl = String(opts.publicBaseUrl || TELEGRAM_PUBLIC_BASE_URL || "").trim();
+  if (req.secure) return true;
+  const forwardedProto = String(req.get("x-forwarded-proto") || "").trim().toLowerCase();
+  if (forwardedProto === "https") return true;
+  return parseOriginHeader(publicBaseUrl).startsWith("https://");
+}
+
+function buildTelegramSessionCookieValue(req, token, opts = {}) {
+  const maxAgeSec = Number.isFinite(Number(opts.maxAgeSec))
+    ? Number(opts.maxAgeSec)
+    : TELEGRAM_SESSION_TTL_SEC;
+  const secureCookie = requestWantsSecureCookie(req, opts);
   const parts = [
     `${TELEGRAM_SESSION_COOKIE}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
-    `Max-Age=${Math.max(60, TELEGRAM_SESSION_TTL_SEC)}`
+    secureCookie ? "SameSite=None" : "SameSite=Lax",
+    `Max-Age=${Math.max(0, maxAgeSec)}`
   ];
-  if (requestWantsSecureCookie(req)) parts.push("Secure");
-  appendSetCookie(res, parts.join("; "));
+  if (secureCookie) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function setTelegramSessionCookie(req, res, token) {
+  appendSetCookie(
+    res,
+    buildTelegramSessionCookieValue(req, token, { maxAgeSec: Math.max(60, TELEGRAM_SESSION_TTL_SEC) })
+  );
 }
 
 function clearTelegramSessionCookie(req, res) {
-  const parts = [
-    `${TELEGRAM_SESSION_COOKIE}=`,
-    "Path=/",
-    "HttpOnly",
-    "SameSite=Lax",
-    "Max-Age=0"
-  ];
-  if (requestWantsSecureCookie(req)) parts.push("Secure");
-  appendSetCookie(res, parts.join("; "));
+  appendSetCookie(res, buildTelegramSessionCookieValue(req, "", { maxAgeSec: 0 }));
 }
 
 function readTelegramSession(req) {
@@ -501,6 +529,41 @@ function readTelegramSession(req) {
   const token = String(cookies[TELEGRAM_SESSION_COOKIE] || "").trim();
   if (!token) return { ok: false, error: "session_missing" };
   return verifyTelegramSessionToken(token);
+}
+
+function telegramRequestOriginAllowed(req, opts = {}) {
+  const method = String(req.method || "GET").trim().toUpperCase();
+  if (["GET", "HEAD", "OPTIONS"].includes(method)) return true;
+
+  const allowedOrigins = new Set();
+  const publicOrigin = parseOriginHeader(String(opts.publicBaseUrl || TELEGRAM_PUBLIC_BASE_URL || "").trim());
+  const requestOrigin = requestOriginFromHeaders(req);
+  if (publicOrigin) allowedOrigins.add(publicOrigin);
+  if (requestOrigin) allowedOrigins.add(requestOrigin);
+
+  const origin = parseOriginHeader(req.get("origin"));
+  if (origin) return allowedOrigins.has(origin);
+
+  const refererOrigin = parseOriginHeader(req.get("referer"));
+  if (refererOrigin) return allowedOrigins.has(refererOrigin);
+
+  const secFetchSite = String(req.get("sec-fetch-site") || "").trim().toLowerCase();
+  return ["same-origin", "same-site", "none"].includes(secFetchSite);
+}
+
+function requireTelegramOrigin(req, res, next) {
+  if (telegramRequestOriginAllowed(req)) return next();
+  const payload = {
+    req_id: req.reqId,
+    method: req.method,
+    path: req.originalUrl,
+    origin: String(req.get("origin") || "").trim() || null,
+    referer: String(req.get("referer") || "").trim() || null,
+    sec_fetch_site: String(req.get("sec-fetch-site") || "").trim() || null
+  };
+  logAt("warn", "telegram_origin_rejected", payload);
+  postHaAuditLogSafe("warn", "telegram_origin_rejected", payload);
+  return res.status(403).json({ ok: false, error: "telegram_origin_invalid" });
 }
 
 function isTelegramPublicRequest(req) {
@@ -644,6 +707,8 @@ app.post("/api/telegram/logout", (req, res) => {
   clearTelegramSessionCookie(req, res);
   return res.json({ ok: true });
 });
+
+app.use("/api/telegram", requireTelegramOrigin);
 
 app.use("/api/telegram", (req, res, next) => {
   if (req.path === "/session" || req.path === "/logout") return next();
@@ -3426,6 +3491,9 @@ module.exports = {
     parseTelegramInitData,
     createTelegramSessionToken,
     verifyTelegramSessionToken,
+    requestWantsSecureCookie,
+    buildTelegramSessionCookieValue,
+    telegramRequestOriginAllowed,
     trackingLifecycleState,
     listTelegramTrackings,
     triggerManualImapRefresh,

@@ -19,6 +19,19 @@ function buildTelegramInitData(user, botToken, authDate = 1_772_000_000) {
   return params.toString();
 }
 
+function buildReq(headers = {}, extra = {}) {
+  const normalized = Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [String(key).toLowerCase(), value])
+  );
+  return {
+    method: extra.method || "GET",
+    secure: !!extra.secure,
+    get(name) {
+      return normalized[String(name).toLowerCase()] || "";
+    }
+  };
+}
+
 test("retention only removes manually delivered packages", () => {
   const store = {
     owners: {
@@ -430,6 +443,65 @@ test("telegram session token roundtrip keeps payload until expiry", () => {
   assert.equal(verified.ok, true);
   assert.equal(verified.payload.telegram_user_id, 123);
   assert.deepEqual(verified.payload.owners, ["owner_a"]);
+});
+
+test("telegram session cookie uses SameSite=None and Secure for https public base", () => {
+  const req = buildReq({ host: "tgpaquetes.duckdns.org" });
+
+  assert.equal(
+    _test.requestWantsSecureCookie(req, { publicBaseUrl: "https://tgpaquetes.duckdns.org" }),
+    true
+  );
+
+  const cookie = _test.buildTelegramSessionCookieValue(req, "signed-token", {
+    publicBaseUrl: "https://tgpaquetes.duckdns.org",
+    maxAgeSec: 600
+  });
+
+  assert.match(cookie, /SameSite=None/);
+  assert.match(cookie, /Secure/);
+  assert.match(cookie, /HttpOnly/);
+});
+
+test("telegram origin check accepts same-origin post and rejects foreign origin", () => {
+  const okReq = buildReq(
+    {
+      host: "tgpaquetes.duckdns.org",
+      origin: "https://tgpaquetes.duckdns.org"
+    },
+    { method: "POST" }
+  );
+  const badReq = buildReq(
+    {
+      host: "tgpaquetes.duckdns.org",
+      origin: "https://evil.example"
+    },
+    { method: "POST" }
+  );
+
+  assert.equal(
+    _test.telegramRequestOriginAllowed(okReq, { publicBaseUrl: "https://tgpaquetes.duckdns.org" }),
+    true
+  );
+  assert.equal(
+    _test.telegramRequestOriginAllowed(badReq, { publicBaseUrl: "https://tgpaquetes.duckdns.org" }),
+    false
+  );
+});
+
+test("telegram origin check allows same-site fetch metadata when origin headers are absent", () => {
+  const req = buildReq(
+    {
+      host: "tgpaquetes.duckdns.org",
+      "sec-fetch-site": "same-origin"
+    },
+    { method: "POST" }
+  );
+
+  assert.equal(
+    _test.telegramRequestOriginAllowed(req, { publicBaseUrl: "https://tgpaquetes.duckdns.org" }),
+    true
+  );
 });
 
 test("telegram listing excludes pre-shipment and foreign owners", () => {

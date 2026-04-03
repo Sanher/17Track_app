@@ -271,6 +271,7 @@ NON_PACKAGE_STRONG_KEYWORDS_ANY = [
     "lottery",
     "boleto",
     "tulotero",
+    "what's new in elevenlabs",
     "cuenta de adobe",
     "reseña en google",
     "lista de deseados de steam",
@@ -648,6 +649,10 @@ def looks_like_noise_weak_token(token: str) -> bool:
     if upper.startswith(("252F", "25252F", "2F", "HTTP", "WWW")):
         return True
     if upper.startswith("WEB-") and digits <= 7:
+        return True
+    if len(compact) >= 20 and letters >= max(10, digits):
+        return True
+    if len(parts) >= 2 and len(compact) >= 18 and letters > digits:
         return True
     if len(parts) >= 3 and alpha_parts >= 2 and digits <= 6:
         return True

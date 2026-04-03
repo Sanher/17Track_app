@@ -368,6 +368,13 @@ class FilteringTests(unittest.TestCase):
         )
         self.assertTrue(
             worker.looks_like_non_package_message(
+                sender="ElevenLabs <no-reply_at_elevenlabs_io_i764n2q451h8ha_d4m25239@icloud.com>",
+                subject="What's new in ElevenLabs? March Product Update",
+                body="tracking shipment package delivery content",
+            )
+        )
+        self.assertTrue(
+            worker.looks_like_non_package_message(
                 sender="Steam <noreply@steampowered.com>",
                 subject="¡Startup Company y otros 4 artículos de tu lista de deseados de Steam están en oferta!",
                 body="tracking shipment package delivery content",
@@ -464,6 +471,19 @@ class ExtractionAndAuthTests(unittest.TestCase):
         )
 
         self.assertIn(weak_token, found)
+
+    def test_extract_tracking_numbers_keeps_clean_order_ref_and_drops_long_random_noise(self):
+        found = worker.extract_tracking_numbers(
+            subject="Tu pedido DTBO2247 con pin 9332 de Khambú - Quart está en camino.",
+            body=(
+                "tracking shipment package delivery "
+                "2BTDP28PBTSWP-2BBORQUCJ8GNHRH3GI7A- "
+                "2BGFE32TURUB28PEQRDUBXWTEQ7CIKQO-"
+            ),
+            sender="Khambú - Quart <orders@delitbee.com>",
+        )
+
+        self.assertEqual(found, ["DTBO2247"])
 
     def test_extract_tracking_numbers_accepts_amazon_order_id_from_official_sender(self):
         found = worker.extract_tracking_numbers(

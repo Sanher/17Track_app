@@ -504,6 +504,14 @@ test("telegram origin check allows same-site fetch metadata when origin headers 
   );
 });
 
+test("sensor state text is cropped to 255 chars", () => {
+  const raw = "A".repeat(400);
+  const result = _test.truncateSensorStateText(raw);
+
+  assert.equal(result.length, 255);
+  assert.match(result, /\.\.\.$/);
+});
+
 test("telegram listing excludes pre-shipment and foreign owners", () => {
   const store = {
     owners: {

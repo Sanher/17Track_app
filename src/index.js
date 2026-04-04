@@ -2571,6 +2571,14 @@ function buildStatusLine(one, note, opts = {}) {
   return `- ${left}: ${right}${extra ? ` — ${extra}` : ""}${mark}`;
 }
 
+function truncateSensorStateText(value, maxLength = 255) {
+  const text = String(value || "");
+  if (!Number.isFinite(maxLength) || maxLength <= 0) return "";
+  if (text.length <= maxLength) return text;
+  if (maxLength <= 3) return text.slice(0, maxLength);
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
 function matchesFilter(one, filter, trackingMeta = {}) {
   if (!filter) return true;
   const f = String(filter).toLowerCase();
@@ -3309,7 +3317,7 @@ app.get("/api/owner/:owner/status", (req, res) => {
       delivered_override_applied: x.delivered_override_applied,
       trackingMeta: x.meta
     }));
-    return res.type("text/plain").send(lines.join("\n"));
+    return res.type("text/plain").send(truncateSensorStateText(lines.join("\n")));
   }
 
   return res.json({
@@ -3494,6 +3502,7 @@ module.exports = {
     requestWantsSecureCookie,
     buildTelegramSessionCookieValue,
     telegramRequestOriginAllowed,
+    truncateSensorStateText,
     trackingLifecycleState,
     listTelegramTrackings,
     triggerManualImapRefresh,

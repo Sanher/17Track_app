@@ -3,7 +3,8 @@ const state = {
   items: [],
   couriers: [],
   refreshPollId: null,
-  theme: "light"
+  theme: "light",
+  lastMailRefreshAt: ""
 };
 
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
@@ -14,6 +15,7 @@ const appRoot = document.getElementById("appRoot");
 const lockedPanel = document.getElementById("lockedPanel");
 const lockedMessage = document.getElementById("lockedMessage");
 const statusBar = document.getElementById("statusBar");
+const refreshMeta = document.getElementById("refreshMeta");
 const listRoot = document.getElementById("listRoot");
 const itemTemplate = document.getElementById("itemTemplate");
 const refreshMailButton = document.getElementById("refreshMailButton");
@@ -34,6 +36,17 @@ function setStatus(message, isError = false) {
   statusBar.textContent = message;
   statusBar.classList.remove("hidden");
   statusBar.classList.toggle("is-error", !!isError);
+}
+
+function refreshMetaLabel(value) {
+  return value
+    ? `Ultimo refresco de correo: ${formatWhen(value)}`
+    : "Ultimo refresco de correo: sin datos";
+}
+
+function updateRefreshMeta() {
+  if (!refreshMeta) return;
+  refreshMeta.textContent = refreshMetaLabel(state.lastMailRefreshAt);
 }
 
 function setAccessState(isAuthorized, message = "") {
@@ -159,6 +172,8 @@ function startRefreshPolling() {
 
       stopRefreshPolling();
       setMailRefreshBusy(false);
+      state.lastMailRefreshAt = status.last_finished_at || state.lastMailRefreshAt;
+      updateRefreshMeta();
       if (status.last_exit_code === 0 || status.last_exit_code === null) {
         setStatus("Refresco de correo completado. Actualizando paquetes...");
         await loadTrackings();
@@ -273,6 +288,9 @@ async function bootstrap() {
     setAccessState(true);
     userMeta.textContent = `Acceso para ${state.me.display_name}`;
     setStatus("Cargando mini app...");
+    const refreshStatus = await loadRefreshStatus().catch(() => null);
+    state.lastMailRefreshAt = refreshStatus?.last_finished_at || "";
+    updateRefreshMeta();
     await loadTrackings();
     setStatus("");
   } catch (error) {
@@ -326,4 +344,5 @@ backToTopButton.addEventListener("click", () => {
 
 window.addEventListener("scroll", updateBackToTopVisibility, { passive: true });
 
+updateRefreshMeta();
 bootstrap();

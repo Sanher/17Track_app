@@ -339,6 +339,13 @@ body {
   margin-left: auto;
 }
 
+.refresh-meta {
+  margin: 0 0 0 auto;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
 .stat-chip,
 .owner-chip,
 .status-pill,
@@ -614,6 +621,10 @@ button:disabled {
   }
 
   .stats-bar {
+    margin-left: 0;
+  }
+
+  .refresh-meta {
     margin-left: 0;
   }
 }

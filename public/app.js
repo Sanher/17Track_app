@@ -7,7 +7,8 @@ const state = {
   theme: localStorage.getItem("paquetes_app_theme") || "",
   scopedByHaUser: null,
   refreshPollId: null,
-  rawDebugEnabled: false
+  rawDebugEnabled: false,
+  lastMailRefreshAt: ""
 };
 
 const heroText = document.getElementById("heroText");
@@ -22,6 +23,7 @@ const dateToInput = document.getElementById("dateToInput");
 const clearFiltersButton = document.getElementById("clearFiltersButton");
 const ownersRoot = document.getElementById("ownersRoot");
 const statsBar = document.getElementById("statsBar");
+const refreshMeta = document.getElementById("refreshMeta");
 const statusBar = document.getElementById("statusBar");
 const ownerTemplate = document.getElementById("ownerTemplate");
 const itemTemplate = document.getElementById("itemTemplate");
@@ -154,6 +156,17 @@ function setStatus(message, type = "info") {
   statusBar.classList.remove("hidden");
 }
 
+function refreshMetaLabel(value) {
+  return value
+    ? `Ultimo refresco de correo: ${formatWhen(value)}`
+    : "Ultimo refresco de correo: sin datos";
+}
+
+function updateRefreshMeta() {
+  if (!refreshMeta) return;
+  refreshMeta.textContent = refreshMetaLabel(state.lastMailRefreshAt);
+}
+
 function escapeHtml(value) {
   return String(value || "")
     .replaceAll("&", "&amp;")
@@ -205,6 +218,8 @@ function startRefreshPolling() {
 
       stopRefreshPolling();
       setMailRefreshBusy(false);
+      state.lastMailRefreshAt = status.last_finished_at || state.lastMailRefreshAt;
+      updateRefreshMeta();
       if (status.last_exit_code === 0 || status.last_exit_code === null) {
         setStatus("Refresco de correo completado. Actualizando listado...");
         await loadOwners();
@@ -704,15 +719,22 @@ async function openRawDebugDialog() {
 async function loadOwners() {
   refreshButton.disabled = true;
   try {
-    const payload = await apiFetch("/api/ui/owners");
+    const [payload, refreshStatus] = await Promise.all([
+      apiFetch("/api/ui/owners"),
+      loadMailRefreshStatus().catch(() => null)
+    ]);
     state.owners = Array.isArray(payload.owners) ? payload.owners : [];
     state.scopedByHaUser = payload.scoped_by_ha_user || null;
     state.rawDebugEnabled = payload.raw_debug_enabled === true;
+    state.lastMailRefreshAt = refreshStatus?.last_finished_at || "";
     syncSelectionToKnownItems();
     updateHeroText();
     updateDebugButtonVisibility();
+    updateRefreshMeta();
     renderOwners();
-    setStatus(`Vista cargada. Retencion delivered: ${payload.delivered_retention_days} dias.`);
+    setStatus(
+      `Vista cargada. Retencion delivered: ${payload.delivered_retention_days} dias. ${refreshMetaLabel(state.lastMailRefreshAt)}.`
+    );
   } catch (error) {
     setStatus(`No se pudo cargar la vista: ${error.message}`, "error");
     ownersRoot.innerHTML = '<div class="empty-state">No hemos podido cargar los paquetes todavia.</div>';
@@ -904,5 +926,6 @@ deleteOlderButton.addEventListener("click", async () => {
 
 applyTheme(preferredTheme());
 updateHeroText();
+updateRefreshMeta();
 
 loadOwners();

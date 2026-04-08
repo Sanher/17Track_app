@@ -403,6 +403,27 @@ def normalize_string_list(value: Any) -> list[str]:
     return out
 
 
+def normalize_mailbox_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, (list, tuple)):
+        raw = list(value)
+    else:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        mailbox = str(item or "").strip()
+        if not mailbox or mailbox in seen:
+            continue
+        seen.add(mailbox)
+        out.append(mailbox)
+    return out
+
+
 def first_email_domain(from_header: str) -> str:
     raw = str(from_header or "").strip().lower()
     if not raw:
@@ -978,7 +999,7 @@ def account_block_for_email(email_addr: str, today: date | None = None) -> dict[
     return None
 
 
-def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
+def normalize_account(raw: Any, default_owner: str, mailbox_override: str | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("account_not_object")
 
@@ -1004,7 +1025,7 @@ def normalize_account(raw: Any, default_owner: str) -> dict[str, Any]:
 
     port = parse_int(raw.get("port"), 993)
     username = str(raw.get("username") or email_addr).strip()
-    mailbox = str(raw.get("mailbox") or "INBOX").strip()
+    mailbox = str(mailbox_override or raw.get("mailbox") or "INBOX").strip()
     auth = str(raw.get("auth") or "").strip().lower()
     if not auth:
         auth = "password"
@@ -1068,22 +1089,29 @@ def load_accounts() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for idx, account in enumerate(parsed):
         try:
-            normalized = normalize_account(account, default_owner=default_owner)
-            if normalized["enabled"]:
-                block = account_block_for_email(normalized["email"])
-                if block:
-                    log(
-                        "info",
-                        "imap_account_skipped_disabled_by_code" if block.get("mode") == "permanent" else "imap_account_skipped_temporarily_disabled",
-                        idx=idx,
-                        email=normalized["email"],
-                        disabled_until=block.get("disabled_until"),
-                        reason=block.get("reason"),
-                    )
-                    continue
-                out.append(normalized)
-            else:
-                log("info", "imap_account_skipped_disabled", idx=idx, email=normalized["email"])
+            mailboxes = normalize_mailbox_list(account.get("mailboxes")) if isinstance(account, dict) else []
+            if not mailboxes:
+                single_mailbox = str(account.get("mailbox") or "").strip() if isinstance(account, dict) else ""
+                mailboxes = [single_mailbox] if single_mailbox else [None]
+
+            for mailbox in mailboxes:
+                normalized = normalize_account(account, default_owner=default_owner, mailbox_override=mailbox)
+                if normalized["enabled"]:
+                    block = account_block_for_email(normalized["email"])
+                    if block:
+                        log(
+                            "info",
+                            "imap_account_skipped_disabled_by_code" if block.get("mode") == "permanent" else "imap_account_skipped_temporarily_disabled",
+                            idx=idx,
+                            email=normalized["email"],
+                            mailbox=normalized["mailbox"],
+                            disabled_until=block.get("disabled_until"),
+                            reason=block.get("reason"),
+                        )
+                        continue
+                    out.append(normalized)
+                else:
+                    log("info", "imap_account_skipped_disabled", idx=idx, email=normalized["email"], mailbox=normalized["mailbox"])
         except Exception as exc:
             error_text = str(exc)
             if error_text.startswith("provider_not_supported:") or error_text.startswith("auth_not_supported:oauth2"):
@@ -1229,6 +1257,7 @@ def process_account(
                     "imap_message_suspicious_candidates",
                     owner=account["owner"],
                     email=account["email"],
+                    mailbox=account["mailbox"],
                     uid=uid,
                     sender=str(sender or "").strip() or None,
                     subject=str(subject or "").strip()[:180] or None,
@@ -1415,6 +1444,7 @@ def main() -> int:
                         "imap_account_binding_reconciled",
                         owner=account["owner"],
                         email=account["email"],
+                        mailbox=account["mailbox"],
                         reconciliation=reconciliation,
                     )
             except Exception as exc:
@@ -1423,6 +1453,7 @@ def main() -> int:
                     "imap_account_binding_failed",
                     owner=account["owner"],
                     email=account["email"],
+                    mailbox=account["mailbox"],
                     error=str(exc),
                 )
 
@@ -1441,6 +1472,8 @@ def main() -> int:
                         "warn",
                         "imap_ignore_rules_fetch_failed",
                         owner=account["owner"],
+                        email=account["email"],
+                        mailbox=account["mailbox"],
                         error=str(exc),
                     )
                 ignore_rules_by_owner[account["owner"]] = owner_ignore_rules
@@ -1478,6 +1511,7 @@ def main() -> int:
                 owner=account["owner"],
                 email=account["email"],
                 provider=account["provider"],
+                mailbox=account["mailbox"],
                 scanned=scanned,
                 filtered=filtered_out,
                 filtered_reasons=filtered_reasons,
@@ -1495,6 +1529,7 @@ def main() -> int:
                 owner=account["owner"],
                 email=account["email"],
                 provider=account["provider"],
+                mailbox=account["mailbox"],
                 error=str(exc),
                 traceback=traceback.format_exc(limit=1).strip(),
             )

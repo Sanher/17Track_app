@@ -81,6 +81,23 @@ class AccountNormalizationTests(unittest.TestCase):
         self.assertEqual(account["owner"], "_disabled")
         self.assertNotIn("password", account)
 
+    def test_normalize_account_accepts_mailbox_override(self):
+        with patch.dict(os.environ, {"PW_BOX": "pw_box"}, clear=False):
+            account = worker.normalize_account(
+                {
+                    "email": "multi@gmail.com",
+                    "owner": "owner_a",
+                    "provider": "gmail",
+                    "auth": "password",
+                    "password_env": "PW_BOX",
+                    "mailbox": "INBOX",
+                },
+                default_owner="",
+                mailbox_override="[Gmail]/All Mail",
+            )
+
+        self.assertEqual(account["mailbox"], "[Gmail]/All Mail")
+
     def test_load_accounts_from_file_uses_default_owner(self):
         with tempfile.TemporaryDirectory() as td:
             accounts_path = Path(td) / "accounts.json"
@@ -112,6 +129,33 @@ class AccountNormalizationTests(unittest.TestCase):
         self.assertEqual(len(accounts), 1)
         self.assertEqual(accounts[0]["owner"], "owner_file")
         self.assertEqual(accounts[0]["password"], "pw_from_file")
+
+    def test_load_accounts_expands_multiple_mailboxes_for_same_account(self):
+        with patch.dict(
+            os.environ,
+            {
+                "IMAP_ACCOUNTS_JSON": json.dumps(
+                    [
+                        {
+                            "email": "multi@gmail.com",
+                            "owner": "owner_multi",
+                            "auth": "password",
+                            "password_env": "PW_MULTI",
+                            "mailboxes": ["INBOX", "[Gmail]/All Mail"],
+                        }
+                    ]
+                ),
+                "PW_MULTI": "pw_multi",
+            },
+            clear=False,
+        ):
+            accounts = worker.load_accounts()
+
+        self.assertEqual(len(accounts), 2)
+        self.assertEqual(accounts[0]["mailbox"], "INBOX")
+        self.assertEqual(accounts[1]["mailbox"], "[Gmail]/All Mail")
+        self.assertEqual(accounts[0]["email"], "multi@gmail.com")
+        self.assertEqual(accounts[1]["email"], "multi@gmail.com")
 
     def test_load_accounts_defaults_owner_to_unnamed(self):
         with patch.dict(

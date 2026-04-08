@@ -131,8 +131,11 @@ Notas:
 
 - Gmail: usa app passwords (`auth=password`) y guarda el valor real en la env var indicada por `password_env`.
 - `password_env` debe contener el nombre de variable (ej: `IMAP_GMAIL_1_APP_PASSWORD`), no la password literal.
+- `mailbox` es opcional y por defecto usa `INBOX`.
+- `mailboxes` (`string[]`) permite escanear varias carpetas/labels IMAP con la misma cuenta.
 - Outlook/Hotmail ya no se leen por IMAP desde esta app. Si necesitas esos correos, redirígelos automáticamente a una cuenta Gmail que sí esté en `IMAP_ACCOUNTS_JSON`.
 - No subas secretos al repo: usa `.env` local o secretos del add-on en Home Assistant.
+- En Gmail filtrado/archivado, si la regla saca los correos de `Recibidos`, usa la label/carpeta real o `"[Gmail]/All Mail"` para no perder esos mensajes.
 
 Filtros opcionales por cuenta (`filters` dentro de cada objeto):
 
@@ -153,6 +156,7 @@ Ejemplo cuenta con filtro "solo Amazon para Mislata":
   "owner": "owner_b",
   "auth": "password",
   "password_env": "IMAP_GMAIL_FILTER_APP_PASSWORD",
+  "mailboxes": ["[Gmail]/All Mail"],
   "filters": {
     "only_amazon": true,
     "destination_keywords_all": ["mislata"],

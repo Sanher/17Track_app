@@ -98,6 +98,22 @@ class AccountNormalizationTests(unittest.TestCase):
 
         self.assertEqual(account["mailbox"], "[Gmail]/All Mail")
 
+    def test_normalize_account_strips_optional_mailbox_quotes(self):
+        with patch.dict(os.environ, {"PW_BOX": "pw_box"}, clear=False):
+            account = worker.normalize_account(
+                {
+                    "email": "multi@gmail.com",
+                    "owner": "owner_a",
+                    "provider": "gmail",
+                    "auth": "password",
+                    "password_env": "PW_BOX",
+                },
+                default_owner="",
+                mailbox_override='"[Gmail]/All Mail"',
+            )
+
+        self.assertEqual(account["mailbox"], "[Gmail]/All Mail")
+
     def test_load_accounts_from_file_uses_default_owner(self):
         with tempfile.TemporaryDirectory() as td:
             accounts_path = Path(td) / "accounts.json"
@@ -680,6 +696,31 @@ class ExtractionAndAuthTests(unittest.TestCase):
         self.assertIsNone(worker.official_carrier_from_sender("DOMADOO <assistance@domadoo.com>"))
         self.assertIsNone(worker.official_carrier_from_sender("MIRAVIA <miravia@service.miravia.es>"))
 
+
+
+
+class ImapMailboxSerializationTests(unittest.TestCase):
+    def test_build_imap_mailbox_arg_quotes_gmail_all_mail(self):
+        self.assertEqual(worker.build_imap_mailbox_arg('[Gmail]/All Mail'), '"[Gmail]/All Mail"')
+
+    def test_list_new_uids_quotes_mailbox_before_select(self):
+        class _FakeClient:
+            def __init__(self):
+                self.selected = []
+
+            def select(self, mailbox, readonly=False):
+                self.selected.append((mailbox, readonly))
+                return 'OK', [b'1']
+
+            def uid(self, command, charset, criteria):
+                self.last_uid_call = (command, charset, criteria)
+                return 'OK', [b'10 11']
+
+        client = _FakeClient()
+        uids = worker.list_new_uids(client, '[Gmail]/All Mail', last_uid=0, lookback_days=0)
+
+        self.assertEqual(uids, [10, 11])
+        self.assertEqual(client.selected, [('"[Gmail]/All Mail"', True)])
 
 class ProcessAccountTests(unittest.TestCase):
     def test_process_account_marks_package_like_without_tracking(self):

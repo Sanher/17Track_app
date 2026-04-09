@@ -403,6 +403,22 @@ def normalize_string_list(value: Any) -> list[str]:
     return out
 
 
+def normalize_mailbox_name(value: Any) -> str:
+    mailbox = strip_optional_quotes(str(value or "").strip())
+    mailbox = mailbox.replace("\r", " ").replace("\n", " ").strip()
+    mailbox = re.sub(r"\s+", " ", mailbox)
+    return mailbox
+
+
+# Python 3.14 no longer auto-quotes mailbox names in imaplib.select/examine,
+# so mailbox values containing spaces (for example Gmail's All Mail label)
+# must be serialized as a valid IMAP quoted-string before sending.
+def build_imap_mailbox_arg(mailbox: Any) -> str:
+    normalized = normalize_mailbox_name(mailbox)
+    escaped = normalized.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def normalize_mailbox_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -416,7 +432,7 @@ def normalize_mailbox_list(value: Any) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
     for item in raw:
-        mailbox = str(item or "").strip()
+        mailbox = normalize_mailbox_name(item)
         if not mailbox or mailbox in seen:
             continue
         seen.add(mailbox)
@@ -929,9 +945,11 @@ def list_new_uids(
     last_uid: int,
     lookback_days: int,
 ) -> list[int]:
-    status, _ = client.select(mailbox, readonly=True)
+    normalized_mailbox = normalize_mailbox_name(mailbox) or "INBOX"
+    mailbox_arg = build_imap_mailbox_arg(normalized_mailbox)
+    status, _ = client.select(mailbox_arg, readonly=True)
     if status != "OK":
-        raise RuntimeError(f"imap_select_failed:{mailbox}")
+        raise RuntimeError(f"imap_select_failed:{normalized_mailbox}")
 
     if last_uid <= 0 and lookback_days > 0:
         since = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%d-%b-%Y")
@@ -1035,7 +1053,7 @@ def normalize_account(raw: Any, default_owner: str, mailbox_override: str | None
 
     port = parse_int(raw.get("port"), 993)
     username = str(raw.get("username") or email_addr).strip()
-    mailbox = str(mailbox_override or raw.get("mailbox") or "INBOX").strip()
+    mailbox = normalize_mailbox_name(mailbox_override or raw.get("mailbox") or "INBOX") or "INBOX"
     auth = str(raw.get("auth") or "").strip().lower()
     if not auth:
         auth = "password"

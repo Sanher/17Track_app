@@ -1,6 +1,6 @@
 {
   "name": "17track_app",
-  "version": "2.6.12",
+  "version": "2.6.13",
   "private": true,
   "type": "commonjs",
   "main": "src/index.js",

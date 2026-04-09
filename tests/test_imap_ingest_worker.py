@@ -703,10 +703,19 @@ class ImapMailboxSerializationTests(unittest.TestCase):
     def test_build_imap_mailbox_arg_quotes_gmail_all_mail(self):
         self.assertEqual(worker.build_imap_mailbox_arg('[Gmail]/All Mail'), '"[Gmail]/All Mail"')
 
+    def test_parse_imap_list_mailbox_line_extracts_special_use_name(self):
+        parsed = worker.parse_imap_list_mailbox_line(b'(\\HasNoChildren \\All) "/" "[Gmail]/Todos"')
+
+        self.assertEqual(parsed, ({"\\hasnochildren", "\\all"}, "[Gmail]/Todos"))
+
     def test_list_new_uids_quotes_mailbox_before_select(self):
         class _FakeClient:
             def __init__(self):
                 self.selected = []
+
+            def list(self, directory="", pattern="*"):
+                self.list_call = (directory, pattern)
+                return 'OK', [b'(\\HasNoChildren \\All) "/" "[Gmail]/All Mail"']
 
             def select(self, mailbox, readonly=False):
                 self.selected.append((mailbox, readonly))
@@ -721,6 +730,29 @@ class ImapMailboxSerializationTests(unittest.TestCase):
 
         self.assertEqual(uids, [10, 11])
         self.assertEqual(client.selected, [('"[Gmail]/All Mail"', True)])
+
+    def test_list_new_uids_resolves_localized_all_mail_from_list(self):
+        class _FakeClient:
+            def __init__(self):
+                self.selected = []
+
+            def list(self, directory="", pattern="*"):
+                self.list_call = (directory, pattern)
+                return 'OK', [b'(\\HasNoChildren \\All) "/" "[Gmail]/Todos"']
+
+            def select(self, mailbox, readonly=False):
+                self.selected.append((mailbox, readonly))
+                return 'OK', [b'1']
+
+            def uid(self, command, charset, criteria):
+                self.last_uid_call = (command, charset, criteria)
+                return 'OK', [b'10 11']
+
+        client = _FakeClient()
+        uids = worker.list_new_uids(client, '[Gmail]/All Mail', last_uid=0, lookback_days=0)
+
+        self.assertEqual(uids, [10, 11])
+        self.assertEqual(client.selected, [('"[Gmail]/Todos"', True)])
 
 class ProcessAccountTests(unittest.TestCase):
     def test_process_account_marks_package_like_without_tracking(self):

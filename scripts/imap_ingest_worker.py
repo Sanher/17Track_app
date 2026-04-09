@@ -419,6 +419,67 @@ def build_imap_mailbox_arg(mailbox: Any) -> str:
     return f'"{escaped}"'
 
 
+def mailbox_requests_all_mail(value: Any) -> bool:
+    normalized = normalize_mailbox_name(value).lower()
+    return (
+        normalized == "all mail"
+        or normalized == "todos"
+        or normalized.endswith("/all mail")
+        or normalized.endswith("/todos")
+    )
+
+
+def parse_imap_list_mailbox_line(raw_line: Any) -> tuple[set[str], str] | None:
+    if isinstance(raw_line, (bytes, bytearray)):
+        line = bytes(raw_line).decode("utf-8", errors="replace")
+    else:
+        line = str(raw_line or "")
+    line = line.strip()
+    if not line or not line.startswith("("):
+        return None
+
+    match = re.match(r"^\((?P<flags>[^)]*)\)\s+(?P<rest>.+)$", line)
+    if not match:
+        return None
+
+    flags = {flag.strip().lower() for flag in match.group("flags").split() if flag.strip()}
+    rest = match.group("rest").strip()
+    if not rest:
+        return None
+
+    delimiter_match = re.match(r'^(?:"(?:[^"\\]|\\.)*"|NIL)\s+(?P<name>.+)$', rest, re.IGNORECASE)
+    if not delimiter_match:
+        return None
+
+    mailbox_name = normalize_mailbox_name(delimiter_match.group("name"))
+    if not mailbox_name:
+        return None
+    return flags, mailbox_name
+
+
+def resolve_special_use_mailbox(client: imaplib.IMAP4_SSL, mailbox: str) -> str:
+    normalized = normalize_mailbox_name(mailbox) or "INBOX"
+    if not mailbox_requests_all_mail(normalized):
+        return normalized
+
+    try:
+        status, data = client.list("", "*")
+    except Exception:
+        return normalized
+    if status != "OK" or not isinstance(data, list):
+        return normalized
+
+    for raw_line in data:
+        parsed = parse_imap_list_mailbox_line(raw_line)
+        if not parsed:
+            continue
+        flags, mailbox_name = parsed
+        if "\\all" in flags:
+            return mailbox_name
+
+    return normalized
+
+
 def normalize_mailbox_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -945,7 +1006,7 @@ def list_new_uids(
     last_uid: int,
     lookback_days: int,
 ) -> list[int]:
-    normalized_mailbox = normalize_mailbox_name(mailbox) or "INBOX"
+    normalized_mailbox = resolve_special_use_mailbox(client, mailbox)
     mailbox_arg = build_imap_mailbox_arg(normalized_mailbox)
     status, _ = client.select(mailbox_arg, readonly=True)
     if status != "OK":

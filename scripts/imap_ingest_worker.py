@@ -618,10 +618,20 @@ def extract_message_text(msg: Any) -> str:
         else:
             plain_parts.append(body)
 
-    if plain_parts:
-        text = "\n".join(plain_parts)
-    else:
-        text = "\n".join(html_parts)
+    # Multipart transactional emails sometimes keep the useful delivery
+    # details only in HTML while the plain-text alternative is truncated.
+    # Merge both representations and dedupe exact repeats so filters and
+    # Amazon order extraction do not miss address/order data.
+    merged_parts: list[str] = []
+    seen_parts: set[str] = set()
+    for part in plain_parts + html_parts:
+        normalized = str(part or "").strip()
+        if not normalized or normalized in seen_parts:
+            continue
+        seen_parts.add(normalized)
+        merged_parts.append(normalized)
+
+    text = "\n".join(merged_parts)
     return re.sub(r"\s+", " ", text).strip()
 
 

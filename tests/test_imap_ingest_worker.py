@@ -568,6 +568,29 @@ class ExtractionAndAuthTests(unittest.TestCase):
 
         self.assertEqual(worker.resolve_sender_header(msg), "Carrier <noreply@example.com>")
 
+    def test_extract_message_text_merges_html_when_plain_is_incomplete(self):
+        msg = EmailMessage()
+        msg["From"] = "Amazon.es <shipment-tracking@amazon.es>"
+        msg["Subject"] = "En reparto: Carplay Cable USB C Carga..."
+        msg.set_content("Tu paquete esta en reparto.")
+        msg.add_alternative(
+            """
+            <html>
+              <body>
+                <p>Tu paquete está en reparto.</p>
+                <p>Cliente - Torre De Porta Coeli, Valencia</p>
+                <p>Pedido n.º 408-6815184-5400326</p>
+              </body>
+            </html>
+            """,
+            subtype="html",
+        )
+
+        body = worker.extract_message_text(msg)
+
+        self.assertIn("408-6815184-5400326", body)
+        self.assertIn("torre de porta coeli, valencia", body.lower())
+
     def test_guess_carrier_does_not_prefer_generic_correos_from_body(self):
         carrier = worker.guess_carrier(
             sender="GLS <tracking@gls.com>",

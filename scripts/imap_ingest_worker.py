@@ -429,6 +429,14 @@ def mailbox_requests_all_mail(value: Any) -> bool:
     )
 
 
+def append_unique_mailbox(candidates: list[str], seen: set[str], value: Any) -> None:
+    mailbox = normalize_mailbox_name(value)
+    if not mailbox or mailbox in seen:
+        return
+    seen.add(mailbox)
+    candidates.append(mailbox)
+
+
 def parse_imap_list_mailbox_line(raw_line: Any) -> tuple[set[str], str] | None:
     if isinstance(raw_line, (bytes, bytearray)):
         line = bytes(raw_line).decode("utf-8", errors="replace")
@@ -457,27 +465,68 @@ def parse_imap_list_mailbox_line(raw_line: Any) -> tuple[set[str], str] | None:
     return flags, mailbox_name
 
 
-def resolve_special_use_mailbox(client: imaplib.IMAP4_SSL, mailbox: str) -> str:
+def resolve_special_use_mailboxes(client: imaplib.IMAP4_SSL, mailbox: str) -> list[str]:
     normalized = normalize_mailbox_name(mailbox) or "INBOX"
+    if normalized.upper() == "INBOX":
+        return [normalized]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    append_unique_mailbox(candidates, seen, normalized)
     if not mailbox_requests_all_mail(normalized):
-        return normalized
+        return candidates
 
     try:
         status, data = client.list("", "*")
-    except Exception:
-        return normalized
-    if status != "OK" or not isinstance(data, list):
-        return normalized
+    except Exception as exc:
+        log("warn", "imap_mailbox_list_failed", requested=normalized, error=str(exc))
+        data = []
+        status = "ERROR"
 
-    for raw_line in data:
-        parsed = parse_imap_list_mailbox_line(raw_line)
-        if not parsed:
-            continue
-        flags, mailbox_name = parsed
-        if "\\all" in flags:
-            return mailbox_name
+    if status == "OK" and isinstance(data, list):
+        for raw_line in data:
+            parsed = parse_imap_list_mailbox_line(raw_line)
+            if not parsed:
+                continue
+            flags, mailbox_name = parsed
+            if "\\all" in flags or "\\allmail" in flags or mailbox_requests_all_mail(mailbox_name):
+                append_unique_mailbox(candidates, seen, mailbox_name)
 
-    return normalized
+    # Gmail may expose All Mail under localized or branded prefixes even when
+    # LIST does not surface a \All mailbox clearly enough for us to parse.
+    for fallback in (
+        "[Gmail]/All Mail",
+        "[Google Mail]/All Mail",
+        "[Gmail]/Todos",
+        "[Google Mail]/Todos",
+    ):
+        append_unique_mailbox(candidates, seen, fallback)
+
+    return candidates
+
+
+def select_mailbox(client: imaplib.IMAP4_SSL, mailbox: str) -> str:
+    requested = normalize_mailbox_name(mailbox) or "INBOX"
+    candidates = resolve_special_use_mailboxes(client, requested)
+    tried: list[str] = []
+
+    for candidate in candidates:
+        mailbox_arg = build_imap_mailbox_arg(candidate)
+        status, _ = client.select(mailbox_arg, readonly=True)
+        tried.append(candidate)
+        if status == "OK":
+            if candidate != requested:
+                log(
+                    "info",
+                    "imap_mailbox_selected_fallback",
+                    requested=requested,
+                    selected=candidate,
+                    tried=tried,
+                )
+            return candidate
+
+    log("warn", "imap_mailbox_select_failed", requested=requested, tried=tried)
+    raise RuntimeError(f"imap_select_failed:{requested}")
 
 
 def normalize_mailbox_list(value: Any) -> list[str]:
@@ -1006,11 +1055,7 @@ def list_new_uids(
     last_uid: int,
     lookback_days: int,
 ) -> list[int]:
-    normalized_mailbox = resolve_special_use_mailbox(client, mailbox)
-    mailbox_arg = build_imap_mailbox_arg(normalized_mailbox)
-    status, _ = client.select(mailbox_arg, readonly=True)
-    if status != "OK":
-        raise RuntimeError(f"imap_select_failed:{normalized_mailbox}")
+    selected_mailbox = select_mailbox(client, mailbox)
 
     if last_uid <= 0 and lookback_days > 0:
         since = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%d-%b-%Y")

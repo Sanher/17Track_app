@@ -33,6 +33,13 @@ const HA_USER_OWNERS_FILE = String(process.env.HA_USER_OWNERS_FILE || "/config/h
 const RAW_DEBUG_OWNER = String.fromCharCode(100, 97, 118, 105, 100);
 const APP_ROOT_DIR = path.join(__dirname, "..");
 const IMAP_WORKER_SCRIPT = path.join(APP_ROOT_DIR, "scripts", "imap_ingest_worker.py");
+const SUPERVISOR_TOKEN = String(process.env.SUPERVISOR_TOKEN || "").trim();
+const HA_INTERNAL_BASE_URL = String(process.env.HA_INTERNAL_BASE_URL || "http://supervisor/core/api")
+  .trim()
+  .replace(/\/$/, "");
+let serverInstance = null;
+let shutdownHooksRegistered = false;
+let shutdownInProgress = false;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -1083,6 +1090,7 @@ function inferImapProvider(email) {
 // Home Assistant notify target:
 //   HA_URL (e.g. http://homeassistant:8123 or http://192.168.x.x:8123)
 //   HA_TOKEN (Long-Lived Access Token)
+//   SUPERVISOR_TOKEN (preferred inside Home Assistant via http://supervisor/core/api)
 //   HA_SCRIPT (script entity/service name without domain, default: jarvis_17track_notify)
 
 const BG_ENABLED_RAW = process.env.BG_ENABLED;
@@ -1100,16 +1108,43 @@ const HA_URL = String(process.env.HA_URL || "").trim().replace(/\/$/, "");
 const HA_TOKEN = String(process.env.HA_TOKEN || "").trim();
 const HA_SCRIPT = String(process.env.HA_SCRIPT || "jarvis_17track_notify").trim();
 
-async function callHAService(domain, service, data) {
-  if (!HA_URL || !HA_TOKEN) {
-    throw new Error("HA_URL/HA_TOKEN no configurados");
+function resolveHaApiConfig(opts = {}) {
+  const directUrl = String((opts.haUrl ?? HA_URL) || "").trim().replace(/\/$/, "");
+  const directToken = String((opts.haToken ?? HA_TOKEN) || "").trim();
+  if (directUrl && directToken) {
+    return {
+      mode: "direct",
+      base_url: directUrl,
+      token: directToken
+    };
   }
 
-  const url = `${HA_URL}/api/services/${domain}/${service}`;
+  const supervisorToken = String((opts.supervisorToken ?? SUPERVISOR_TOKEN) || "").trim();
+  const supervisorBaseUrl = String((opts.supervisorBaseUrl ?? HA_INTERNAL_BASE_URL) || "")
+    .trim()
+    .replace(/\/$/, "");
+  if (supervisorToken && supervisorBaseUrl) {
+    return {
+      mode: "supervisor_proxy",
+      base_url: supervisorBaseUrl,
+      token: supervisorToken
+    };
+  }
+
+  return null;
+}
+
+async function callHAService(domain, service, data) {
+  const haApi = resolveHaApiConfig();
+  if (!haApi) {
+    throw new Error("HA API no configurada");
+  }
+
+  const url = `${haApi.base_url}/services/${domain}/${service}`;
   const r = await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${HA_TOKEN}`,
+      Authorization: `Bearer ${haApi.token}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(data || {})
@@ -1135,6 +1170,7 @@ const bgState = {
   enabled: BG_ENABLED,
   running: false,
   intervalId: null,
+  startupTimeoutId: null,
   lastRunAt: null,
   lastError: null,
   lastSummary: null
@@ -1143,6 +1179,7 @@ const bgState = {
 const imapManualRefreshState = {
   running: false,
   pid: null,
+  child: null,
   last_started_at: null,
   last_finished_at: null,
   last_exit_code: null,
@@ -1160,8 +1197,8 @@ function isNonNegativeNumber(n) {
 
 function validateStartupConfig() {
   const missing = [];
-  if (!HA_URL) missing.push("HA_URL");
-  if (!HA_TOKEN) missing.push("HA_TOKEN");
+  const haApi = resolveHaApiConfig();
+  if (!haApi) missing.push("HA_URL+HA_TOKEN o SUPERVISOR_TOKEN");
   if (!HA_SCRIPT) missing.push("HA_SCRIPT");
 
   const invalid = [];
@@ -1210,7 +1247,9 @@ function validateStartupConfig() {
     bg_slow_hours: BG_SLOW_HOURS,
     bg_delay_ms: BG_DELAY_MS,
     delivered_retention_days: DELIVERED_RETENTION_DAYS,
-    ha_configured: !!(HA_URL && HA_TOKEN),
+    ha_configured: !!haApi,
+    ha_mode: haApi?.mode || null,
+    ha_base_url: haApi?.base_url || null,
     json_limit: APP_JSON_LIMIT,
     ha_audit_log_enabled: HA_AUDIT_LOG_ENABLED,
     ha_audit_log_level: HA_AUDIT_LOG_LEVEL,
@@ -1448,7 +1487,7 @@ app.get("/api/bg/status", (_req, res) => {
     last_run_at: bgState.lastRunAt,
     last_error: bgState.lastError,
     last_summary: bgState.lastSummary,
-    ha_configured: !!(HA_URL && HA_TOKEN)
+    ha_configured: !!resolveHaApiConfig()
   });
 });
 
@@ -1471,11 +1510,7 @@ app.post("/api/bg/start", (_req, res) => {
 });
 
 app.post("/api/bg/stop", (_req, res) => {
-  if (bgState.intervalId) {
-    clearInterval(bgState.intervalId);
-    bgState.intervalId = null;
-  }
-  bgState.enabled = false;
+  stopBackgroundScheduler();
   res.json({ ok: true, stopped: true });
 });
 
@@ -2078,6 +2113,7 @@ function triggerManualImapRefresh(trigger = {}, deps = {}) {
 
   state.running = true;
   state.pid = child.pid || null;
+  state.child = child;
   state.last_started_at = new Date().toISOString();
   state.last_finished_at = null;
   state.last_exit_code = null;
@@ -2110,6 +2146,7 @@ function triggerManualImapRefresh(trigger = {}, deps = {}) {
   child.on("error", (error) => {
     state.running = false;
     state.pid = null;
+    state.child = null;
     state.last_finished_at = new Date().toISOString();
     state.last_error = String(error.message || error);
     logFn("error", "imap_manual_refresh_failed_to_start", {
@@ -2123,6 +2160,7 @@ function triggerManualImapRefresh(trigger = {}, deps = {}) {
   child.on("close", (code) => {
     state.running = false;
     state.pid = null;
+    state.child = null;
     state.last_finished_at = new Date().toISOString();
     state.last_exit_code = code;
     state.last_error = code === 0 ? null : `imap_manual_refresh_exit_${code}`;
@@ -3454,8 +3492,9 @@ function startBackgroundIfEnabled() {
   if (bgState.intervalId) return;
 
   // Run once shortly after boot (helps after restarts / power cuts).
-  setTimeout(() => {
+  bgState.startupTimeoutId = setTimeout(() => {
     bgRunOnce().catch(() => { });
+    bgState.startupTimeoutId = null;
   }, 10_000);
 
   bgState.intervalId = setInterval(() => {
@@ -3471,15 +3510,92 @@ function startBackgroundIfEnabled() {
   });
 }
 
+function stopBackgroundScheduler() {
+  if (bgState.startupTimeoutId) {
+    clearTimeout(bgState.startupTimeoutId);
+    bgState.startupTimeoutId = null;
+  }
+  if (bgState.intervalId) {
+    clearInterval(bgState.intervalId);
+    bgState.intervalId = null;
+  }
+  bgState.enabled = false;
+}
+
+function gracefulShutdown(signal) {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+
+  logAt("warn", "process_shutdown_started", {
+    signal,
+    bg_running: !!bgState.intervalId,
+    imap_manual_refresh_running: !!imapManualRefreshState.running,
+    imap_manual_refresh_pid: imapManualRefreshState.pid
+  });
+
+  stopBackgroundScheduler();
+
+  if (imapManualRefreshState.child && typeof imapManualRefreshState.child.kill === "function") {
+    try {
+      imapManualRefreshState.child.kill("SIGTERM");
+      logAt("info", "imap_manual_refresh_shutdown_signal_sent", {
+        signal,
+        pid: imapManualRefreshState.pid
+      });
+    } catch (e) {
+      logAt("warn", "imap_manual_refresh_shutdown_signal_failed", {
+        signal,
+        pid: imapManualRefreshState.pid,
+        error: String(e.message || e)
+      });
+    }
+  }
+
+  const server = serverInstance;
+  if (!server || typeof server.close !== "function") {
+    process.exit(0);
+    return;
+  }
+
+  const forcedExit = setTimeout(() => {
+    logAt("warn", "process_shutdown_forced", { signal });
+    process.exit(0);
+  }, 10_000);
+  if (typeof forcedExit.unref === "function") forcedExit.unref();
+
+  server.close(() => {
+    clearTimeout(forcedExit);
+    logAt("info", "process_shutdown_finished", { signal });
+    process.exit(0);
+  });
+}
+
 function startServer(listenPort = process.env.PORT || 8787) {
   validateStartupConfig();
-  return app.listen(listenPort, () => {
-    console.log(`HA IMAP Tracker listening on ${listenPort}`);
+  serverInstance = app.listen(listenPort, () => {
+    const address = typeof serverInstance?.address === "function" ? serverInstance.address() : null;
+    const boundHost = typeof address === "object" && address ? address.address : null;
+    const boundPort = typeof address === "object" && address ? address.port : listenPort;
+    const boundFamily = typeof address === "object" && address ? address.family : null;
+    console.log(`HA IMAP Tracker listening on ${boundPort}`);
     console.log(`[DATA] store path: ${DATA_DIR}/${STORE_FILE}`);
     console.log(`[APP] log level: ${APP_LOG_LEVEL}`);
     console.log(`[APP] version: ${APP_VERSION}`);
+    logAt("info", "server_listening", {
+      port: boundPort,
+      host: boundHost,
+      family: boundFamily
+    });
     startBackgroundIfEnabled();
   });
+
+  if (!shutdownHooksRegistered) {
+    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+    process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+    shutdownHooksRegistered = true;
+  }
+
+  return serverInstance;
 }
 
 if (require.main === module) {
@@ -3518,6 +3634,9 @@ module.exports = {
     canViewHaIngressDebug,
     RAW_DEBUG_OWNER,
     normalizeManualTrackingStatus,
-    buildManualTrackingSnapshot
+    buildManualTrackingSnapshot,
+    resolveHaApiConfig,
+    stopBackgroundScheduler,
+    gracefulShutdown
   }
 };

@@ -32,6 +32,36 @@ function buildReq(headers = {}, extra = {}) {
   };
 }
 
+test("resolveHaApiConfig prefers explicit HA URL/token over supervisor proxy", () => {
+  const result = _test.resolveHaApiConfig({
+    haUrl: "http://homeassistant:8123/",
+    haToken: "llt-token",
+    supervisorToken: "supervisor-token",
+    supervisorBaseUrl: "http://supervisor/core/api"
+  });
+
+  assert.deepEqual(result, {
+    mode: "direct",
+    base_url: "http://homeassistant:8123",
+    token: "llt-token"
+  });
+});
+
+test("resolveHaApiConfig falls back to supervisor proxy when direct HA config is absent", () => {
+  const result = _test.resolveHaApiConfig({
+    haUrl: "",
+    haToken: "",
+    supervisorToken: "supervisor-token",
+    supervisorBaseUrl: "http://supervisor/core/api/"
+  });
+
+  assert.deepEqual(result, {
+    mode: "supervisor_proxy",
+    base_url: "http://supervisor/core/api",
+    token: "supervisor-token"
+  });
+});
+
 test("retention only removes manually delivered packages", () => {
   const store = {
     owners: {
@@ -678,6 +708,7 @@ test("manual imap refresh updates state on successful close", async () => {
 
   assert.equal(state.running, false);
   assert.equal(state.pid, null);
+  assert.equal(state.child, null);
   assert.equal(state.last_exit_code, 0);
   assert.equal(state.last_error, null);
   assert.deepEqual(lines, ["linea uno", "linea dos", "warning uno"]);

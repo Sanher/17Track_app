@@ -67,11 +67,18 @@ Integración con Home Assistant (notificaciones):
 
 - `HA_URL`
 - `HA_TOKEN`
+- `SUPERVISOR_TOKEN` (preferido dentro de Home Assistant app/add-on; usa el proxy interno `http://supervisor/core/api`)
+- `HA_INTERNAL_BASE_URL` (opcional, default `http://supervisor/core/api`)
 - `HA_SCRIPT` (default `jarvis_17track_notify`)
 - `HA_AUDIT_LOG_ENABLED` (`1|true|yes|on`) para enviar eventos de auditoría al logbook de HA.
 - `HA_AUDIT_LOG_LEVEL`: `debug|info|warn|error` (default `warn`).
 - `HA_AUDIT_LOG_NAME`: nombre en logbook (default `HA IMAP Tracker`).
 - `HA_AUDIT_LOG_ENTITY_ID`: opcional, para asociar entradas a una entidad.
+
+Notas:
+
+- Si la app corre dentro de Home Assistant Supervisor, se recomienda `SUPERVISOR_TOKEN` en vez de depender de una URL/IP fija de Core.
+- `HA_URL` + `HA_TOKEN` siguen siendo compatibles como override explícito o para arranque fuera de Home Assistant.
 
 ## Worker IMAP
 

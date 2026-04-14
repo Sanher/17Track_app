@@ -29,8 +29,8 @@ jobs:
         with:
           app-id: ${{ vars.PARENT_SYNC_APP_ID }}
           private-key: ${{ secrets.PARENT_SYNC_APP_PRIVATE_KEY }}
-          owner: ${{ format('{0}{1}', 'San', 'her') }}
-          repositories: ${{ format('{0}{1}', 'san', 'her-ha-addons') }}
+          owner: Sanher
+          repositories: sanher-ha-addons
           permission-contents: write
 
       - name: Send repository dispatch to parent
@@ -41,13 +41,11 @@ jobs:
           REPO_NAME: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-          TARGET_OWNER: ${{ format('{0}{1}', 'San', 'her') }}
-          TARGET_REPO: ${{ format('{0}{1}', 'san', 'her-ha-addons') }}
         run: |
           curl -sSf -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
-            https://api.github.com/repos/${TARGET_OWNER}/${TARGET_REPO}/dispatches \
+            https://api.github.com/repos/Sanher/sanher-ha-addons/dispatches \
             -d @- <<JSON
           {
             "event_type": "child-tag-published",

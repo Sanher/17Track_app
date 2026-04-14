@@ -1081,6 +1081,17 @@ function inferImapProvider(email) {
   return "generic";
 }
 
+function isUnsupportedImapProvider(providerRaw, email) {
+  const provider = String(providerRaw || "").trim().toLowerCase();
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  return (
+    provider === "outlook" ||
+    normalizedEmail.includes("@hotmail.") ||
+    normalizedEmail.includes("@outlook.") ||
+    normalizedEmail.includes("@live.")
+  );
+}
+
 // ---- Background scheduler (Step 3) ----
 // Enable with: BG_ENABLED=1 (also accepts true/yes/on)
 // Interval: BG_INTERVAL_MIN (default 15)
@@ -1677,7 +1688,8 @@ function normalizeImapAccountEntry(a) {
   const email = String(a?.email || "").trim().toLowerCase();
   if (!email || !email.includes("@")) return null;
   const providerRaw = String(a?.provider || "").trim().toLowerCase();
-  const provider = providerRaw === "outlook" ? "generic" : (providerRaw || inferImapProvider(email));
+  if (isUnsupportedImapProvider(providerRaw, email)) return null;
+  const provider = providerRaw || inferImapProvider(email);
   const enabled = maybeBool(a?.enabled);
   return {
     email,
@@ -2865,6 +2877,18 @@ app.post("/api/owner/:owner/imap/accounts", (req, res) => {
     postHaAuditLogSafe("warn", "imap_account_upsert_invalid_email", payload);
     return res.status(400).json({ ok: false, owner, error: "email_invalido" });
   }
+  if (isUnsupportedImapProvider(provider || inferImapProvider(email), email)) {
+    const payload = {
+      req_id: req.reqId,
+      owner,
+      account_email: email,
+      provider: provider || "outlook",
+      error: "provider_not_supported"
+    };
+    logAt("warn", "imap_account_upsert_unsupported_provider", payload);
+    postHaAuditLogSafe("warn", "imap_account_upsert_unsupported_provider", payload);
+    return res.status(400).json({ ok: false, owner, error: "provider_not_supported" });
+  }
 
   const store = loadStore();
   const o = ensureOwnerShape(store, owner);
@@ -3625,6 +3649,8 @@ module.exports = {
     splitLogLines,
     ownerTrackings,
     trackingSource,
+    isUnsupportedImapProvider,
+    normalizeImapAccountEntry,
     clearOwnerStoreData,
     sanitizeStore,
     reconcileImapAccountOwnership,

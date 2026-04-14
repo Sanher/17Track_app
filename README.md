@@ -140,7 +140,7 @@ Notas:
 - `password_env` debe contener el nombre de variable (ej: `IMAP_GMAIL_1_APP_PASSWORD`), no la password literal.
 - `mailbox` es opcional y por defecto usa `INBOX`.
 - `mailboxes` (`string[]`) permite escanear varias carpetas/labels IMAP con la misma cuenta.
-- Outlook/Hotmail ya no se leen por IMAP desde esta app. Si necesitas esos correos, redirígelos automáticamente a una cuenta Gmail que sí esté en `IMAP_ACCOUNTS_JSON`.
+- Outlook/Hotmail ya no se leen por IMAP desde esta app y la API los rechaza explícitamente. Si necesitas esos correos, redirígelos automáticamente a una cuenta Gmail que sí esté en `IMAP_ACCOUNTS_JSON`.
 - No subas secretos al repo: usa `.env` local o secretos del add-on en Home Assistant.
 - En Gmail filtrado/archivado, si la regla saca los correos de `Recibidos`, usa la label/carpeta real o `"[Gmail]/All Mail"` para no perder esos mensajes.
 

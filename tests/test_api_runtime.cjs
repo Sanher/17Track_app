@@ -62,6 +62,29 @@ test("resolveHaApiConfig falls back to supervisor proxy when direct HA config is
   });
 });
 
+test("isUnsupportedImapProvider rejects outlook and hotmail domains", () => {
+  assert.equal(_test.isUnsupportedImapProvider("outlook", "user@example.com"), true);
+  assert.equal(_test.isUnsupportedImapProvider("", "user@hotmail.com"), true);
+  assert.equal(_test.isUnsupportedImapProvider("", "user@outlook.es"), true);
+  assert.equal(_test.isUnsupportedImapProvider("", "user@live.com"), true);
+  assert.equal(_test.isUnsupportedImapProvider("gmail", "user@gmail.com"), false);
+});
+
+test("normalizeImapAccountEntry drops unsupported outlook accounts", () => {
+  assert.equal(
+    _test.normalizeImapAccountEntry({ email: "user@hotmail.com", provider: "outlook", enabled: true }),
+    null
+  );
+  assert.deepEqual(
+    _test.normalizeImapAccountEntry({ email: "user@gmail.com", provider: "gmail", enabled: true }),
+    {
+      email: "user@gmail.com",
+      provider: "gmail",
+      enabled: true
+    }
+  );
+});
+
 test("retention only removes manually delivered packages", () => {
   const store = {
     owners: {

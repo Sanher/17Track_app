@@ -2,7 +2,7 @@
 """
 IMAP -> ingest worker.
 
-Reads multiple email accounts (Gmail app password or Outlook OAuth2),
+Reads multiple email accounts via IMAP (Gmail app password or generic IMAP),
 extracts tracking-like updates from new emails, and pushes them to:
 POST /api/owner/:owner/imap/ingest
 """

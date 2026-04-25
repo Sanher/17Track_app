@@ -729,6 +729,7 @@ class ImapMailboxSerializationTests(unittest.TestCase):
         uids = worker.list_new_uids(client, '[Gmail]/All Mail', last_uid=0, lookback_days=0)
 
         self.assertEqual(uids, [10, 11])
+        self.assertEqual(client.list_call, ('""', "*"))
         self.assertEqual(client.selected, [('"[Gmail]/All Mail"', True)])
 
     def test_list_new_uids_resolves_localized_all_mail_from_list(self):

@@ -477,7 +477,7 @@ def resolve_special_use_mailboxes(client: imaplib.IMAP4_SSL, mailbox: str) -> li
         return candidates
 
     try:
-        status, data = client.list("", "*")
+        status, data = client.list('""', "*")
     except Exception as exc:
         log("warn", "imap_mailbox_list_failed", requested=normalized, error=str(exc))
         data = []
